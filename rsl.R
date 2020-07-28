@@ -3,8 +3,9 @@
 # Created: 16.07.2020
 
 # Dependencies: (not loaded into namespace due to style guide)
-# library(bnlearn)
-# library(gRain)
+# library(bnlearn) # for constructing bayesian networks
+# library(gRain) # for exact inference on bayesian networks
+# library(MASS) # for ginv()
 
 
 # createRSL - creates an empty Rule Stacking Learner
@@ -402,8 +403,8 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   # build cpt for the classificator node
   dimlist <- list(labels)
   names(dimlist)[1] <- cID
-  # TODO: What to do if solving does not work (singular system)?
-  cPrior <- solve(a = confusionMatrix, b = prior)
+  # Use ginv instead of solve to handle confusion matrices without full rank
+  cPrior <- c(MASS::ginv(confusionMatrix) %*% prior)
   cProbTable <- array(cPrior, dim = length(labels), dimnames = dimlist)
   if(any(cPrior < 0 | cPrior > 1) | !all.equal(sum(cPrior), 1)){
     stop("The given confusion matrix and prior do not work together.")
@@ -607,7 +608,7 @@ plot.rsl <- function(rsl){
 #             1-row dataframe with probabilities of all labels of that node
 .setEvidence <- function(rsl, evidence){
   ev <- lapply(evidence, function(x) unlist(x[1, ]))
-  rsl$compiledNet <- setCPT(rsl$compiledNet, ev)
+  rsl$compiledNet <- gRain::setCPT(rsl$compiledNet, ev)
   
   return(rsl)
 }
@@ -649,6 +650,7 @@ predict.rsl <- function(rsl, data){
     allLabels <- .IDtoClassifierLabels(rsl, names(dataList)[i])
     order <- match(allLabels, colnames(dataList[[i]]))
     if(any(is.na(order))){
+      # TODO: Handle NAs (high priority)
       # add missing labels with prob: (1-sum(prob)) / (number of missing labels)
       missing <- setdiff(allLabels, colnames(dataList[[i]]))
       existingProb <- rowSums(dataList[[i]])
