@@ -636,8 +636,8 @@ predict.rsl <- function(rsl, data){
   # TODO: Add type checks
   # TODO: Implement method "approximate"
   # TODO: Implement type "joint"
-  type <- "marginal"
   # TODO: Optionally also output the rule a-posteriori probabilities
+  type <- "marginal"
   
   rsl <- .compile(rsl)
   
@@ -650,16 +650,23 @@ predict.rsl <- function(rsl, data){
     allLabels <- .IDtoClassifierLabels(rsl, names(dataList)[i])
     order <- match(allLabels, colnames(dataList[[i]]))
     if(any(is.na(order))){
-      # TODO: Handle NAs (high priority)
-      # add missing labels with prob: (1-sum(prob)) / (number of missing labels)
+      # add missing labels
       missing <- setdiff(allLabels, colnames(dataList[[i]]))
-      existingProb <- rowSums(dataList[[i]])
-      missingData <- matrix((1 - existingProb) / length(missing), ncol = length(missing))
+      missingData <- matrix(NA, ncol = length(missing))
       colnames(missingData) <- missing
       dataList[[i]] <- cbind(dataList[[i]], as.data.frame(missingData))
       order <- match(allLabels, colnames(dataList[[i]]))
     }
     dataList[[i]] <- dataList[[i]][, order]
+  }
+  # Impute probabilities to missing labels and NAs
+  # per observation: (1-sum(known probabilities)) / (number of missing probabilities)
+  for(i in seq(along = dataList)){
+    existingProb <- rowSums(dataList[[i]], na.rm = TRUE)
+    nNA <- rowSums(is.na(dataList[[i]]))
+    missingProb <- (1 - existingProb) / nNA
+    missingData <- matrix(missingProb, nrow = nrow(dataList[[i]]), ncol = ncol(dataList[[i]]))
+    dataList[[i]][is.na(dataList[[i]])] <- missingData[is.na(dataList[[i]])]
   }
   
   # compute a-posteriori probabilities

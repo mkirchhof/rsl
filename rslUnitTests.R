@@ -156,3 +156,29 @@ predictTest <- function(){
 }
 
 predictTest()
+
+predictTestNA <- function(){
+  # do not give information on all labels for all observations:
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "ABC", c("A", "B", "C"), confusionMatrix = diag(3))
+  rsl <- addClassifier(rsl, "DE", c("D","E"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "FG", c("F", "G"), confusionMatrix = diag(2))
+  input <- data.frame(A = c(0.1, 0.6, 0.33),
+                      B = c(NA, 0.4, 0.33),
+                      C = c(0.3, NA, 0.33),
+                      D = c(0.5, 0.5, NA),
+                      F = c(0.9, NA, NA),
+                      G = c(0.1, NA, 0.1))
+  out <- predict(rsl, data = input)[, c("A", "B", "C", "D", "E", "F", "G")]
+  out <- round(out, 4)
+  expected <- data.frame(A = c(0.1, 0.6, 0.3333),
+                         B = c(0.6, 0.4, 0.3333),
+                         C = c(0.3, 0, 0.3333),
+                         D = c(0.5, 0.5, 0.5),
+                         E = c(0.5, 0.5, 0.5),
+                         F = c(0.9, 0.5, 0.9),
+                         G = c(0.1, 0.5, 0.1))
+  testthat::expect_equivalent(out, expected)
+}
+
+predictTestNA()
