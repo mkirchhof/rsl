@@ -199,6 +199,55 @@ addRule <- function(rsl, rule, prob = 0.9){
 }
 
 
+# .addJointRule - adds a joint rule (learned in the learn.Rules intermediate step)
+#                 CAUTION: Only for internal testing purposes!
+# Input: 
+#  rsl - an rsl object
+#  weights - the weights of the joint rule in standard order 
+#           (see .generateStandardOrder())
+# Output:
+#  the rsl object with the added joint rule
+.addJointRule <- function(rsl, weights){
+  # get IDs for the joint rule
+  rID <- .getNewRuleID(rsl)
+  aID <- .getNewAuxID(rsl)
+  
+  # Add to rsl$rules
+  rsl$rules <- rbind(rsl$rules, 
+                     data.frame(name = "jointRule", prob = 1, ruleID = rID, auxID = aID,
+                                stringsAsFactors = FALSE))
+  
+  # Build weights into a CPT
+  dimlist <- lapply(rsl$labels, function(x) x$names)
+  ruleStates <- list(c("fulfilled", "not_fulfilled"))
+  names(ruleStates) <- rID
+  rProbTable <- array(as.numeric(c(t(matrix(c(weights, 1 - weights), ncol = 2)))), 
+                      dim = sapply(c(ruleStates, dimlist), length), 
+                      dimnames = c(ruleStates, dimlist))
+  
+  # Build aux CPT
+  auxStates <- list(c("fulfilled", "not_fulfilled"))
+  names(auxStates) <- aID
+  aProbTable <- array(c(1, 0, 0, 1),
+                      dim = c(2, 2), dimnames = c(auxStates, ruleStates))
+  
+  # add rule and aux to rsl$bayesNet
+  tables <- lapply(rsl$bayesNet, "[[", "prob")
+  tables[[rID]] <- rProbTable
+  tables[[aID]] <- aProbTable
+  nodes <- c(bnlearn::nodes(rsl$bayesNet), rID, aID)
+  arcs <- rbind(bnlearn::arcs(rsl$bayesNet), 
+                cbind(names(getLabels(rsl)), rID), 
+                c(rID, aID))
+  rsl$bayesNet <- bnlearn::empty.graph(nodes = nodes)
+  bnlearn::arcs(rsl$bayesNet) <- arcs
+  rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
+  rsl$needsCompilation <- TRUE
+  
+  return(rsl)
+}
+
+
 removeRule <- function(rsl, rule){
   # TODO: Implement (low priority)
 }

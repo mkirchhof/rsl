@@ -208,3 +208,55 @@ learnRulesTest <- function(){
 }
 
 learnRulesTest()
+
+addJointRuleTest <- function(){
+  # See if the added joint rule works just like manually multiplying weights
+  # to all possible variable states, and if it is equal  to the product of 
+  # local rules
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  rsl <- addRule(rsl, "tasty <- junkFood", prob = 0.8)
+  rsl <- addRule(rsl, "not_tasty <- meat", prob = 0.9)
+  rsl <- addRule(rsl, "meat, tasty <- junkFood", prob = 0.6)
+    
+  input <- data.frame(tasty = c(0.1, 0.6, 1),
+                      meat = c(0.7, 0.2, 0),
+                      healthy = c(0.3, 0.7, 0))
+  out <- predict(rsl, data = input)[, c("tasty", "meat", "healthy")]
+  
+  # Manual computation with the joint rule (in standard order):
+  jointRule <- c(0.048, 0.432, 0.432, 0.432, 0.048, 0.108, 0.432, 0.072)
+  p1 <- c(0.021, 0.189, 0.009, 0.081, 0.049, 0.441, 0.021, 0.189) # joint Prior of case 1
+  p2 <- c(0.084, 0.056, 0.336, 0.224, 0.036, 0.024, 0.144, 0.096)
+  p3 <- c(0, 0, 0, 0, 0, 0, 1, 0)
+  post1 <- p1 * jointRule
+  post2 <- p2 * jointRule
+  post3 <- p3 * jointRule
+  expected <- data.frame(tasty = c(sum(post1[c(1, 3, 5, 7)]) / sum(post1),
+                                   sum(post2[c(1, 3, 5, 7)]) / sum(post2),
+                                   sum(post3[c(1, 3, 5, 7)]) / sum(post3)),
+                         meat = c(sum(post1[c(1, 2, 5, 6)]) / sum(post1), 
+                                  sum(post2[c(1, 2, 5, 6)]) / sum(post2),
+                                  sum(post3[c(1, 2, 5, 6)]) / sum(post3)),
+                         healthy = c(sum(post1[c(1, 2, 3, 4)]) / sum(post1), 
+                                     sum(post2[c(1, 2, 3, 4)]) / sum(post2),
+                                     sum(post3[c(1, 2, 3, 4)]) / sum(post3)))
+  
+  # See if the rsl with local rules is the same as our manual joint rule
+  testthat::expect_equivalent(out, expected)
+  
+  # Build a rsl with a joint rule
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  rsl <- .addJointRule(rsl, jointRule)
+  out <- predict(rsl, data = input)[, c("tasty", "meat", "healthy")]
+  
+  # See if our manually computed jointRule is the same as the rsl's implementation
+  testthat::expect_equivalent(out, expected)
+}
+
+addJointRuleTest()
