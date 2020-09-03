@@ -182,3 +182,29 @@ predictTestNA <- function(){
 }
 
 predictTestNA()
+
+learnRulesTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "animal", c("cat", "dog", "mouse"), confusionMatrix = diag(3))
+  rsl <- addClassifier(rsl, "claws", "clawsTrimmed", confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "toPetOrNotToPet", c("pet", "dontPet"), confusionMatrix = diag(2))
+  input <- data.frame(cat = c(0.8, 0.4, 0.2, 0.1, 0.5, 0.2, 0.9, 1/3, 1/3, 0.7),
+                      dog = c(0.15, 0.4, 0.7, 0.2, 0.3, 0.8, 0.07, 1/3, 1/3, 0.2),
+                      mouse = c(0.05, 0.2, 0.1, 0.7, 0.2, 0, 0.03, 1/3, 1/3, 0.1),
+                      clawsTrimmed = c(0.99, 0.8, 0.5, 0.1, 0.5, 0.01, 0.05, 0.01, 0.5, 0.2),
+                      pet = c(0.5, 0.5, 0.5, 0.5, 0.8, 0.6, 0.05, 0.96, 0.01, 0.8))
+  actual <- data.frame(L1 = c("cat", "cat", "dog", "mouse", "cat", "dog", "cat", "dog", "mouse", "cat"),
+                       L2 = c("clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed"),
+                       L3 = c("pet", "pet", "pet", "dontPet", "dontPet", "pet", "dontPet", "pet", "dontPet", "pet"),
+                       stringsAsFactors = FALSE)
+  rsl <- learnRules(rsl, prior = input, actual = actual, nRules = 4, onlyPositiveRules = TRUE)
+  pred <- predict(rsl, input)
+  inputCrisp <- .probabilisticToCrispData(rsl, input, tieBreak = "first")
+  predCrisp <- .probabilisticToCrispData(rsl, pred, tieBreak = "first")
+  (lossPrior <- hammingLoss(inputCrisp, actual))
+  (accPrior <- accuracy(inputCrisp, actual))
+  (lossPosterior <- hammingLoss(predCrisp, actual))
+  (accPosterior <- accuracy(predCrisp, actual))
+}
+
+learnRulesTest()

@@ -212,8 +212,8 @@ getRules <- function(rsl){
 
 .coerceToMultilabel <- function(labels){
   if(length(labels) == 1){
-    warning(paste0("label seems to be binary. Coerced it to multinomial by adding ",
-                   "not_", labels, " as second category."))
+    warning(paste0("label seems to be binary. Coerced it to multilabel by adding ",
+                   "not_", labels, " as second label."))
     # Treat as a binary label and add a "not" case
     labels <- c(labels, paste0("not_", labels))
   }
@@ -232,6 +232,8 @@ addLabels <- function(rsl, labels, prior = NA){
   }
   if(.labelsAlreadyExist(rsl, labels)){
     stop("Some of the labels already exist in the rsl. Please choose unique names.")
+    # Note: If you want to change the code to support non-unique labels, 
+    # code for learnRules() has to be changed aswell.
   }
   if(any(duplicated(labels))){
     stop("Label names are not unique.")
@@ -324,9 +326,18 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   if(.classifierAlreadyExists(rsl, name)){
     stop("name is already given to a classifier. Please select a new one.")
   }
+  if(any(colSums(confusionMatrix) == 0)){
+    # We don't know the confusion structure of some label the classifier outputs.
+    # Make them non-informative
+    warning(paste0("confusionMatrix does not contain information on the case that ",
+                   "the classifier outputs the label(s) ", 
+                   colnames(confusionMatrix)[colSums(confusionMatrix) == 0],
+                   ". Adding uniform distribution on those cases.", collapse = ", "))
+    confusionMatrix[, colSums(confusionMatrix) == 0] <- 1 / nrow(confusionMatrix)
+  }
   if(any(confusionMatrix > 1)){
     # Assume the confusionMatrix is raw
-    confusionMatrix <- confusionMatrix / rep(colSums(confusionMatrix), nrow(confusionMatrix))
+    confusionMatrix <- confusionMatrix / rep(colSums(confusionMatrix), each = nrow(confusionMatrix))
   }
   
   labels <- .coerceToMultilabel(labels)
@@ -335,6 +346,8 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
     prior <- rep(1/length(labels), length(labels))
   }
   if(length(prior) == 1 && !is.na(prior)){
+    # TODO: This could be dangerous if the labels are given by the user in a 
+    # non-intuitive order. Maybe we should force the user to give all priors.
     prior <- c(prior, 1 - prior)
   }
   
@@ -377,11 +390,13 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   # them yet:
   labelNode <- .labelSetToID(rsl, labels)
   if(!is.na(labelNode)){
-    if(!is.null(bnlearn::parents(rsl$bayesNet, labelNode))){
+    if(length(bnlearn::parents(rsl$bayesNet, labelNode)) != 0){
       stop("Labels already exist and have a classifier connected to them.")
     } else {
-      warning(paste0("labels ", labels, " already found in the rsl.", 
-                     "Connecting the classifier to those labels. Re-using old prior."))
+      # I think this is expected behaviour, so removed the warning
+      # warning(paste0("labels ", labels, " already found in the rsl.", 
+      #                "Connecting the classifier to those labels. Re-using old prior.", 
+      #                collapse = ", "))
       prior <- rsl$labels[[labelNode]]$prior
     }
   } else {
@@ -403,8 +418,16 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   # build cpt for the classificator node
   dimlist <- list(labels)
   names(dimlist)[1] <- cID
-  # Use ginv instead of solve to handle confusion matrices without full rank
-  cPrior <- c(MASS::ginv(confusionMatrix) %*% prior)
+  # If the label prior is uniform, we can choose the classifier prior uniform, too
+  # (which can avoid problems by the numerical inversion of ginv() )
+  if(all(prior == 1 / length(prior))){
+    cPrior <- prior
+  } else {
+    # Use ginv instead of solve to handle confusion matrices without full rank
+    cPrior <- c(MASS::ginv(confusionMatrix) %*% prior)
+    # TODO: When using ginv, make sure the result is projected into the [0,1]
+    # space when the rank is not full
+  }
   cProbTable <- array(cPrior, dim = length(labels), dimnames = dimlist)
   if(any(cPrior < 0 | cPrior > 1) | !all.equal(sum(cPrior), 1)){
     stop("The given confusion matrix and prior do not work together.")
@@ -464,7 +487,7 @@ print.rsl <- function(rsl){
       "Labels:\n", 
       paste(sapply(labels, paste, collapse = " | "), collapse = "\n"), "\n\n",
       "Rules:\n",
-      paste(rules$name, " (prob = ", rules$prob, ")", sep = "", collapse = "\n"), "\n",
+      paste(rules$name, " (prob = ", round(rules$prob, 4), ")", sep = "", collapse = "\n"), "\n",
       sep = "")
 }
 
@@ -545,12 +568,18 @@ plot.rsl <- function(rsl){
   isClassif <- sapply(rsl$classifiers, function(x){
     classifLabels <- colnames(x$confusionMatrix)
     return(all(labels %in% classifLabels))
-    })
+  })
   if(length(isClassif) > 0 && sum(isClassif) == 1){
     return(names(rsl$classifiers)[isClassif])
   } else {
     return(NA)
   }
+}
+
+# .classifierIDtoLabelID - for a given classifier ID, returns the ID of the 
+#                          label set it classifies
+.classifierIDtoLabelID <- function(rsl, id){
+  return(.labelSetToID(rsl, .IDtoClassifierLabels(rsl, id)))
 }
 
 
@@ -595,7 +624,7 @@ plot.rsl <- function(rsl){
 .setAuxEvidence <- function(rsl){
   auxs <- .getAllAuxNodes(rsl)
   rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = auxs, 
-                                        states = rep("fulfilled", length(auxs)))
+                       states = rep("fulfilled", length(auxs)))
   
   return(rsl)
 }
@@ -621,6 +650,45 @@ plot.rsl <- function(rsl){
 }
 
 
+# .preprocessData - adds missing labels and missing probabilities and reorders
+#                   the columns of a dataframe into the standard scheme
+# Output:
+#  a list where each entry corresponds to a node and contains a dataframe with
+#  the imputed prior weights of the labels in that node for each observation
+.preprocessData <- function(rsl, data){
+  # match columns of data to classifiers (https://stackoverflow.com/a/51298361)
+  labelIDs <- sapply(colnames(data), .labelsToClassifierID, rsl = rsl)
+  dataList <- split.default(data, labelIDs)
+  # check if the nodes contain all of their labels
+  # Add labels and re-order if necessary
+  for(i in seq(along = dataList)){
+    allLabels <- .IDtoClassifierLabels(rsl, names(dataList)[i])
+    order <- match(allLabels, colnames(dataList[[i]]))
+    if(any(is.na(order))){
+      # add missing labels
+      missing <- setdiff(allLabels, colnames(dataList[[i]]))
+      missingData <- matrix(NA, ncol = length(missing))
+      colnames(missingData) <- missing
+      dataList[[i]] <- cbind(dataList[[i]], as.data.frame(missingData))
+      order <- match(allLabels, colnames(dataList[[i]]))
+    }
+    dataList[[i]] <- dataList[[i]][, order]
+  }
+  
+  # Impute probabilities to missing labels and NAs
+  # per observation: (1-sum(known probabilities)) / (number of missing probabilities)
+  for(i in seq(along = dataList)){
+    existingProb <- rowSums(dataList[[i]], na.rm = TRUE)
+    nNA <- rowSums(is.na(dataList[[i]]))
+    missingProb <- (1 - existingProb) / nNA
+    missingData <- matrix(missingProb, nrow = nrow(dataList[[i]]), ncol = ncol(dataList[[i]]))
+    dataList[[i]][is.na(dataList[[i]])] <- missingData[is.na(dataList[[i]])]
+  }
+  
+  return(dataList)
+}
+
+
 # predict.rsl - computes a-posteriori estimates of all labels
 # Input:
 #  rsl - an rsl object
@@ -641,33 +709,7 @@ predict.rsl <- function(rsl, data){
   
   rsl <- .compile(rsl)
   
-  # match columns of data to classifiers (https://stackoverflow.com/a/51298361)
-  labelIDs <- sapply(colnames(data), .labelsToClassifierID, rsl = rsl)
-  dataList <- split.default(data, labelIDs)
-  # check if the nodes contain all of their labels
-  # Add labels and re-order if necessary
-  for(i in seq(along = dataList)){
-    allLabels <- .IDtoClassifierLabels(rsl, names(dataList)[i])
-    order <- match(allLabels, colnames(dataList[[i]]))
-    if(any(is.na(order))){
-      # add missing labels
-      missing <- setdiff(allLabels, colnames(dataList[[i]]))
-      missingData <- matrix(NA, ncol = length(missing))
-      colnames(missingData) <- missing
-      dataList[[i]] <- cbind(dataList[[i]], as.data.frame(missingData))
-      order <- match(allLabels, colnames(dataList[[i]]))
-    }
-    dataList[[i]] <- dataList[[i]][, order]
-  }
-  # Impute probabilities to missing labels and NAs
-  # per observation: (1-sum(known probabilities)) / (number of missing probabilities)
-  for(i in seq(along = dataList)){
-    existingProb <- rowSums(dataList[[i]], na.rm = TRUE)
-    nNA <- rowSums(is.na(dataList[[i]]))
-    missingProb <- (1 - existingProb) / nNA
-    missingData <- matrix(missingProb, nrow = nrow(dataList[[i]]), ncol = ncol(dataList[[i]]))
-    dataList[[i]][is.na(dataList[[i]])] <- missingData[is.na(dataList[[i]])]
-  }
+  dataList <- .preprocessData(rsl, data)
   
   # compute a-posteriori probabilities
   labels <- unlist(getLabels(rsl))
@@ -694,8 +736,365 @@ predict.rsl <- function(rsl, data){
 }
 
 
-# learnRules
-learnRules <- function(rsl, data, nRules = NA, method = "hammingtion"){
-  # TODO: Implement (low priority)
+# .generateStandardOrder - creates a matrix of all possible label combinations.
+#                          Each column is a label node and iterates through its
+#                          possible labels using expand.grid order
+.generateStandardOrder <- function(rsl){
+  return(expand.grid(getLabels(rsl), stringsAsFactors = FALSE))
 }
 
+
+# .computeGradientHamming - computes the gradient for hamming loss of a 
+#                               given combination of priors and actuals
+# Input:
+#  weights - the current weights of the rules in standard order
+#  jointPrior - the joint prior distribution of the observation in standard order
+#  actual - character vector containing the actual values for each label node
+#  standardOrder - the dataframe with the standard order of labels (this could
+#                  also just be generated by .generateStandardOrder(), but re-
+#                  creating it each time we compute a gradient is too costy)
+# Output:
+#  the gradient, a numeric vector of the same length as weights
+# NOTE:
+#  For a better intuition: standardOrder is a matrix. jointPrior, weights and
+#  the gradient are in the same order as the COLUMNS of that matrix. actual is
+#  in the order of the ROWS of that matrix.
+.computeGradientHamming <- function(weights, jointPrior, actual, standardOrder){
+  # TODO: re-check if this is implemented correctly (with Lena)
+  grad <- rep(0, length(weights))
+  logLik <- 0
+  for(l in seq(ncol(standardOrder))){
+    # For each label, add its gradient to the overall log loss gradient
+    labelIsCorrect <- standardOrder[, l] == actual[l]
+    probLabelCorrect <- sum((jointPrior * weights)[labelIsCorrect]) / sum(jointPrior * weights)
+    prefactor <- probLabelCorrect^2 / sum((weights * jointPrior)[labelIsCorrect]) * jointPrior
+    gradCorrect <- prefactor * (1 - probLabelCorrect) / probLabelCorrect
+    gradIncorrect <- - prefactor
+    labelGrad <- ifelse(labelIsCorrect, gradCorrect, gradIncorrect)
+    
+    # Because we have a log loss, we don't simply have the sum, but need to 
+    # weight it with 1 / probLabelCorrect 
+    # (because d/dx log(prod f(x)) = sum 1 / f(x) * d/dx f(x))
+    # TODO: Check if this way of avoiding NaNs in the grad is ok (high priority)
+    gradAdd <- 1 / probLabelCorrect * labelGrad
+    if(!any(is.nan(gradAdd))){
+      grad <- grad + gradAdd
+    }
+    
+    logLik <- logLik + log(probLabelCorrect)
+  }
+  
+  # Note that we have to use a "* (-1)" in order to have the gradient showing
+  # towards the steepest ascent (not descent)
+  grad <- -grad
+  
+  return(list(grad = grad, logLik = logLik))
+}
+
+
+# .cosSimilarity - computes the cosine similarity between two numeric vectors
+.cosSimilarity <- function(a, b){
+  return(sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2))))
+}
+
+
+# learnRules - learns rules for an rsl object in order to maximize an 
+#              a-posteriori loss given data
+# Input:
+#  rsl - an rsl object without any rules yet (existing rules will be deleted)
+#  prior - a dataframe where each column corresponds to a label and gives the 
+#          probability  of that label (not all labels have to be given, NA are allowed)
+#  actual - a dataframe where each column corresponds to a label node (!) and 
+#           gives its correct label (all nodes have to be given, NAs are not allowed)
+#           So, it has to has as many columns as there are label groups.
+#  nRules - the desired number of rules to be learned
+#  method - "hamming" for optimizing the a-posteriori hamming loss
+#  onlyPositiveRules - logical indicating whether only rules with p in [0.5, 1] 
+#                      should be searched (TRUE) or with p in [0, 1] (FALSE).
+#                      The former is easier to interpret, the latter will have
+#                      better prediction accuracy.
+#  batchsize - batchsize for adam optimizer
+#  alpha - hyperparameter for adam optimizer
+#  beta1 - hyperparameter for adam optimizer
+#  beta2 - hyperparameter for adam optimizer
+#  maxIter1 - maximum iterations before adam optimizer is forcefully stopped
+#  eps - term to avoid dividing by zero for adam optimizer
+#  delta1 - convergence threshold for adam optimizer
+# Output:
+#  rsl object, but with added rules
+learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
+                       onlyPositiveRules = FALSE, 
+                       batchsize = 20, alpha = 0.002, beta1 = 0.9, beta2 = 0.999,
+                       maxIter1 = 10000, delta1 = 1e-6, eps = 1e-8){
+  # TODO: Implement (low priority)
+  # TODO: Allow rsl to have existing rules and use them as starting point
+  # TODO: Allow to auto-tune the nRules by setting it to NA
+  # TODO: Implement method "joint loss"
+  # TODO: Make less restrictions on the actual input and impute if possible
+  # TODO: check that actual is in a correct format
+  # TODO: Make the gradient descent work with incomplete data
+  
+  if(nrow(getRules(rsl)) > 0){
+    stop("The rsl object must not have any rules in it already.")
+  }
+  if(nrow(prior) != nrow(actual)){
+    stop("Unequal number of observations in prior and actual.")
+  }
+  batchsize <- min(nrow(actual), batchsize)
+  
+  # Convert the classifier priors into the actual-label priors
+  # (which corresponds to predicting without any rules)
+  cat("Preparing data...")
+  prior <- predict(rsl, prior)
+  
+  # Adam optimizer
+  # The goal is to find the best "joint rule" that produces the best 
+  # a-posteriori probabilities for the given inputs.
+  cat("Finding best joint rule...")
+  standardOrder <- .generateStandardOrder(rsl)
+  # TODO: Start with random weights or with 0.5^L?
+  weights <- rep(0.5^nRules, nrow(standardOrder))
+  # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
+  t <- 1 # iteration
+  m <- 0 # momentum
+  v <- 0 # exponential moving average of squared gradients
+  repeat{
+    # Compute the minibatch gradient:
+    selectedObs <- sample(nrow(prior), batchsize)
+    grad <- rep(0, length(weights))
+    logLik <- 0
+    for(obs in selectedObs){
+      # It might make sense to compute the joint prior once for all observations
+      # in the beginning, but it might run out of memory
+      # The joint Prior gives the joint prior weight for each possible combination
+      # of labels (= each row) in standardOrder
+      jointPrior <- apply(standardOrder, 1, function(x)
+        prod(prior[obs, colnames(prior) %in% x]))
+      # This uses that labels are unique. If that is changed, we have to change
+      # the computation of jointPrior here too
+      ham <- .computeGradientHamming(weights = weights, 
+                                     jointPrior = jointPrior, 
+                                     actual = unlist(actual[obs, ]),
+                                     standardOrder = standardOrder)
+      logLik <- logLik + ham$logLik
+      grad <- grad + ham$grad
+    }
+    
+    m <- beta1 * m + (1 - beta1) * grad
+    v <- beta2 * v + (1 - beta2) * grad^2
+    mHat <- m / (1 - beta1^t)
+    vHat <- v / (1 - beta2^t)
+    # TODO: Is truncating to [0, 1] a good idea? We could also rescale to [0, 1].
+    newWeights <- pmin(1, pmax(0, weights - alpha / (sqrt(vHat) + eps) * mHat))
+    # TODO: Should we use another loss here because of the invariance of the BN
+    #       to constant factors in the weight vector?
+    diff <- sum((weights -  newWeights)^2)
+    relDiff <- sqrt(diff) / sqrt(sum(weights^2))
+    weights <- newWeights
+    
+    cat("Diff:", diff, ", relDiff:", relDiff, "logLik:", logLik, "\n")
+    temp <- list(weights = weights, diff = diff, relDiff = relDiff, logLik = logLik)
+    save(temp, file = paste0("gradDesc", t, ".RData"))
+    
+    t <- t + 1
+    if(diff < delta1){
+      cat("Converged.\n")
+      break
+    }
+    if(t > maxIter1){
+      cat("Reached maxiter1 without converging.\n")
+      break
+    } 
+  }
+  
+  
+  # Split the joint rule into local rules
+  # Find rules such that the weights generated
+  # by that rule set is as similar as possible to the gradient descent weights
+  # -> why cos distance? Because it ignores the vector's length and only direction counts
+  #    (and the BN always normalizes the weights - so to say - too because of 
+  #    the normalization over the sum of all combinations)
+  cat("Splitting joint rule into", nRules, "local rules...")
+  # start with non-informative rules. 
+  rules <- list()
+  allLabels <- c(unlist(getLabels(rsl)), paste0("!", unlist(getLabels(rsl))))
+  for(rule in seq(nRules)){
+    # -> cos distance only uses direction, not length. So, it does not matter how
+    #    big the values in the vector are as long as they are all the same. So we
+    #    will just use p = 0.5
+    rules[[rule]] <- list(ruleHead = c(),
+                          p = 0.5,
+                          weights = rep(0.5, nrow(standardOrder)))
+  }
+  
+  pLower <- ifelse(onlyPositiveRules, 0.5, 0)
+  rulesWeights <- rep(0.5^nRules, nrow(standardOrder))
+  bestSimilarity <- .cosSimilarity(rulesWeights, weights)
+  # For each rule (greedy)
+  for(rule in seq(nRules)){
+    cat("Rule", rule, "...")
+    # Forward search through all labels for a rule head 
+    best <- rules[[rule]]
+    for(i in seq(length(allLabels))){
+      bestChanged <- FALSE
+      for(label in setdiff(allLabels, best$ruleHead)){
+        proposal <- rules[[rule]]
+        proposal$ruleHead <- c(proposal$ruleHead, label)
+        startsWithNot <- grepl("^!", proposal$ruleHead)
+        cleanedHead <- gsub("^!", "", proposal$ruleHead)
+        trueLabels <- cleanedHead[!startsWithNot]
+        falseLabels <- cleanedHead[startsWithNot]
+        isFulfilled <- apply(standardOrder, 1, function(x){
+          return(any(x %in% trueLabels) | any(!falseLabels %in% x))
+        })
+        # Select the p that optimizes the similarity
+        p <- optimize(function(p){
+          curWeights <- p * isFulfilled + (1 - p) * (!isFulfilled)
+          # Replace current best proposal with our new one
+          proposedWeights <- rulesWeights / rules[[rule]]$weights * curWeights
+          return(.cosSimilarity(proposedWeights, weights))
+        }, lower = pLower, upper = 1, maximum = TRUE)
+        proposal$p <- p$maximum
+        proposal$weights <- proposal$p * isFulfilled + (1 - proposal$p) * (!isFulfilled)
+        
+        # Check if the rule has increased the similarity
+        if(p$objective > bestSimilarity){
+          bestChanged <- TRUE
+          best <- proposal
+          bestSimilarity <- p$objective
+        }
+      }
+      
+      # Stop if similarity has not increased by adding a label
+      if(bestChanged){
+        rulesWeights <- rulesWeights / rules[[rule]]$weights * best$weights
+        rules[[rule]] <- best
+      } else {
+        break
+      }
+    }
+  }
+  
+  
+  
+  # Build found rules into the rsl
+  cat("\nAdding local rules to rsl...\n")
+  for(rule in seq(nRules)){
+    if(length(rules[[rule]]$ruleHead) == 0 | isTRUE(all.equal(rules[[rule]]$p, 0.5))){
+      warning(paste0("Local rule ", rule, " is noninformative. Not adding this rule to rsl."))
+    } else {
+      startsWithNot <- grepl("^!", rules[[rule]]$ruleHead)
+      cleanedHead <- gsub("^!", "", rules[[rule]]$ruleHead)
+      trueLabels <- cleanedHead[!startsWithNot]
+      falseLabels <- cleanedHead[startsWithNot]
+      rsl <- addRule(rsl, 
+                     rule = paste(paste(trueLabels, collapse = ", "), 
+                                  "<-", 
+                                  paste(falseLabels, collapse = ", ")), 
+                     prob = rules[[rule]]$p)
+    }
+  }
+  
+  return(rsl)
+}
+
+
+# .crispToProbabilisticData - turns a dataframe that columns are label nodes and
+#                             is filled with the (crisp) labels of those nodes
+#                             into a dataframe where each column is a label and
+#                             is 1 or 0 depending on whether it is active or not
+.crispToProabilisticData <- function(rsl, data){
+  # TODO: Check for incomplete data and make this a public function
+  # TODO: Implement Unit Tests
+  datalist <- lapply(seq(ncol(data)), function(i){
+    labels <- .IDtoLabels(rsl, colnames(data)[i])
+    isLabel <- matrix(as.numeric(rep(data[, i], each = length(labels)) == labels), 
+                      ncol = length(labels), byrow = TRUE)
+    isLabel <- as.data.frame(isLabel)
+    colnames(isLabel) <- labels
+    return(isLabel)
+  })
+  
+  return(do.call(cbind, datalist))
+}
+
+
+# .probabilisticToCrispData - turns a dataframe where each column is a label and
+#                             gives its label probability into a dataframe where
+#                             each column is a label node and has the label with
+#                             the highest probability
+# Input:
+#  tieBreak - if two labels have the same probability, which should be chosen as
+#             label. "random" to randomize it, "first" to always use the first
+#             and "NA" to report an NA in that case.
+.probabilisticToCrispData <- function(rsl, data, tieBreak = "NA"){
+  # TODO: Check for incomplete data and make this a public function
+  # TODO: Implement Unit Tests
+  
+  .whichMax <- function(probs, tieBreak){
+    isMax <- which(probs == max(probs))
+    if(length(isMax) == 0){
+      return(NA)
+    } else if(length(isMax) == 1){
+      return(isMax)
+    } else if(length(isMax) > 1){
+      if(tieBreak == "random"){
+        return(sample(isMax, 1))
+      } else if(tieBreak == "first"){
+        return(isMax[1])
+      } else if(is.na(tieBreak) || tieBreak == "NA"){
+        return(NA)
+      }
+    }
+  }
+  
+  dataList <- .preprocessData(rsl, data)
+  labelList <- lapply(dataList, function(x){
+    colnames(x)[apply(x, 1, .whichMax, tieBreak)]
+  })
+  labelDataframe <- do.call(cbind, labelList)
+  labelDataframe <- as.data.frame(labelDataframe, stringsAsFactors = FALSE)
+  colnames(labelDataframe) <- sapply(colnames(labelDataframe), function(x) 
+    .classifierIDtoLabelID(rsl, x))
+  
+  return(labelDataframe)
+}
+
+
+# hammingLoss - computes the relative amount of labels that are wrong
+# Input:
+#  pred - dataframe where each column is a labelset and includes its label
+#         prediction per observation
+#  actual - dataframe where each column is a labelset and includes its true label
+#           per observation
+#  na.rm - logical indicating whether NAs in pred or in actual should be ignored
+hammingLoss <- function(pred, actual, na.rm = TRUE){
+  if(any(sapply(pred, class) != "character") | any(sapply(actual, class) != "character")){
+    stop("Wrong types. Please provide dataframes with the label names per observation.")
+  }
+  if(any(dim(pred) != dim(actual))){
+    stop("pred and actual have different dimensions.")
+  }
+  
+  return(mean(pred != actual, na.rm = na.rm))
+}
+
+
+# accuracy - computes the relative amount of observations in which all labels are
+#            correct (keep in mind that here more is better!)
+# Input:
+#  pred - dataframe where each column is a labelset and includes its label
+#         prediction per observation
+#  actual - dataframe where each column is a labelset and includes its true label
+#           per observation
+#  na.rm - logical indicating whether NAs in pred or in actual should be ignored
+accuracy <- function(pred, actual, na.rm = TRUE){
+  if(any(sapply(pred, class) != "character") | any(sapply(actual, class) != "character")){
+    stop("Wrong types. Please provide dataframes with the label names per observation.")
+  }
+  if(any(dim(pred) != dim(actual))){
+    stop("pred and actual have different dimensions.")
+  }
+  
+  return(mean(rowSums(pred == actual) == ncol(pred), na.rm = na.rm))
+}
