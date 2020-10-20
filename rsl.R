@@ -61,8 +61,9 @@ addRule <- function(rsl, rule, prob = 0.9){
   # TODO: Add argument data to automatically learn the prob
   
   if(.ruleAlreadyExists(rsl, rule)){
-    stop(paste0("Rule ", rule, " already exists in the rsl. ",
-                "Please adjust its prob instead of adding it multiple times."))
+    warning(paste0("Rule ", rule, " already exists in the rsl. ",
+                "Please adjust its prob instead of adding it multiple times. Skipping this rule."))
+    return(rsl)
   }
   # TODO: Add more type checks
   
@@ -199,7 +200,7 @@ addRule <- function(rsl, rule, prob = 0.9){
 }
 
 
-# .addJointRule - adds a joint rule (learned in the learn.Rules intermediate step)
+# .addJointRule - adds a joint rule (learned in the learnRules intermediate step)
 #                 CAUTION: Only for internal testing purposes!
 # Input: 
 #  rsl - an rsl object
@@ -375,19 +376,6 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   if(.classifierAlreadyExists(rsl, name)){
     stop("name is already given to a classifier. Please select a new one.")
   }
-  if(any(colSums(confusionMatrix) == 0)){
-    # We don't know the confusion structure of some label the classifier outputs.
-    # Make them non-informative
-    warning(paste0("confusionMatrix does not contain information on the case that ",
-                   "the classifier outputs the label(s) ", 
-                   colnames(confusionMatrix)[colSums(confusionMatrix) == 0],
-                   ". Adding uniform distribution on those cases.", collapse = ", "))
-    confusionMatrix[, colSums(confusionMatrix) == 0] <- 1 / nrow(confusionMatrix)
-  }
-  if(any(confusionMatrix > 1)){
-    # Assume the confusionMatrix is raw
-    confusionMatrix <- confusionMatrix / rep(colSums(confusionMatrix), each = nrow(confusionMatrix))
-  }
   
   labels <- .coerceToMultilabel(labels)
   
@@ -418,6 +406,19 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
     }
     if(!all(dim(confusionMatrix) == c(length(labels), length(labels)))){
       stop("confusionMatrix has the wrong dimensions.")
+    }
+    if(any(colSums(confusionMatrix) == 0)){
+      # We don't know the confusion structure of some label the classifier outputs.
+      # Make them non-informative
+      warning(paste0("confusionMatrix does not contain information on the case that ",
+                     "the classifier outputs the label(s) ", 
+                     colnames(confusionMatrix)[colSums(confusionMatrix) == 0],
+                     ". Adding uniform distribution on those cases.", collapse = ", "))
+      confusionMatrix[, colSums(confusionMatrix) == 0] <- 1 / nrow(confusionMatrix)
+    }
+    if(any(confusionMatrix > 1)){
+      # Assume the confusionMatrix is raw
+      confusionMatrix <- confusionMatrix / rep(colSums(confusionMatrix), each = nrow(confusionMatrix))
     }
     if(!all(colSums(confusionMatrix) == 1)){
       stop("Some cols of confusionMatrix do not sum to 1.")
@@ -673,7 +674,7 @@ plot.rsl <- function(rsl){
 .setAuxEvidence <- function(rsl){
   auxs <- .getAllAuxNodes(rsl)
   rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = auxs, 
-                       states = rep("fulfilled", length(auxs)))
+                                        states = rep("fulfilled", length(auxs)))
   
   return(rsl)
 }
@@ -705,6 +706,9 @@ plot.rsl <- function(rsl){
 #  a list where each entry corresponds to a node and contains a dataframe with
 #  the imputed prior weights of the labels in that node for each observation
 .preprocessData <- function(rsl, data){
+  # TODO: Make sure the output is in the correct order
+  # TODO: Currently removes all labels that are not connected to a classifier (high priority)
+  
   # match columns of data to classifiers (https://stackoverflow.com/a/51298361)
   labelIDs <- sapply(colnames(data), .labelsToClassifierID, rsl = rsl)
   dataList <- split.default(data, labelIDs)
@@ -749,15 +753,17 @@ plot.rsl <- function(rsl){
 #         marginal a-posteriori probabilities or joint MAP estimates
 # Output:
 #   a dataframe where each column gives the estimates of each label
-predict.rsl <- function(rsl, data){
+predict.rsl <- function(rsl, data, showProgress = FALSE){
   # TODO: Add type checks
   # TODO: Implement method "approximate"
   # TODO: Implement type "joint"
   # TODO: Optionally also output the rule a-posteriori probabilities
   type <- "marginal"
   
+  if(showProgress) cat("Compiling rsl...")
   rsl <- .compile(rsl)
   
+  if(showProgress) cat("Preprocessing data...")
   dataList <- .preprocessData(rsl, data)
   
   # compute a-posteriori probabilities
@@ -766,7 +772,9 @@ predict.rsl <- function(rsl, data){
   colnames(post) <- labels
   rownames(post) <- rownames(data)
   post <- as.data.frame(post)
+  if(showProgress) cat("Predicting...\n")
   for(i in seq(nrow(data))){
+    if(showProgress) cat(i, "/", nrow(data), "\n")
     observation <- lapply(dataList, "[", i, , drop = FALSE) # argument left blank on purpose
     rsl <- .removeEvidence(rsl)
     rsl <- .setEvidence(rsl, observation)
@@ -821,20 +829,20 @@ predict.rsl <- function(rsl, data){
     gradIncorrect <- - prefactor
     labelGrad <- ifelse(labelIsCorrect, gradCorrect, gradIncorrect)
     
-    # Because we have a log loss, we don't simply have the sum, but need to 
-    # weight it with 1 / probLabelCorrect 
-    # (because d/dx log(prod f(x)) = sum 1 / f(x) * d/dx f(x))
     # TODO: Check if this way of avoiding NaNs in the grad is ok (high priority)
-    gradAdd <- 1 / probLabelCorrect * labelGrad
+    # TODO: Change logLik etc to other names corresponding to the new method
+    gradAdd <- labelGrad
     if(!any(is.nan(gradAdd))){
-      grad <- grad + gradAdd
+      # Because d/dx log(f(x)) = 1 / x * d/dx f(x)
+      grad <- grad + 1 / probLabelCorrect * gradAdd
     }
     
     logLik <- logLik + log(probLabelCorrect)
   }
   
   # Note that we have to use a "* (-1)" in order to have the gradient showing
-  # towards the steepest ascent (not descent)
+  # towards the steepest ascent (not descent), because we want to maximize 
+  # likelihood, not minimize it
   grad <- -grad
   
   return(list(grad = grad, logLik = logLik))
@@ -847,60 +855,29 @@ predict.rsl <- function(rsl, data){
 }
 
 
-# learnRules - learns rules for an rsl object in order to maximize an 
-#              a-posteriori loss given data
+#.findOptJointRule - uses adam optimizer to find the weights of an optimal joint
+#                    rule
 # Input:
-#  rsl - an rsl object without any rules yet (existing rules will be deleted)
-#  prior - a dataframe where each column corresponds to a label and gives the 
-#          probability  of that label (not all labels have to be given, NA are allowed)
-#  actual - a dataframe where each column corresponds to a label node (!) and 
-#           gives its correct label (all nodes have to be given, NAs are not allowed)
-#           So, it has to has as many columns as there are label groups.
+#  rsl - an rsl object
+#  prior - dataset with priors of the labels (assumed to be preprocessed already)
+#  actual - dataset of correct labels (assumed to be preprocessed already)
 #  nRules - the desired number of rules to be learned
-#  method - "hamming" for optimizing the a-posteriori hamming loss
-#  onlyPositiveRules - logical indicating whether only rules with p in [0.5, 1] 
-#                      should be searched (TRUE) or with p in [0, 1] (FALSE).
-#                      The former is easier to interpret, the latter will have
-#                      better prediction accuracy.
+#  standardOrder - result of .generateStandardOrder(rsl) (handed over as 
+#                  argument to avoid duplicate generation)
 #  batchsize - batchsize for adam optimizer
 #  alpha - hyperparameter for adam optimizer
 #  beta1 - hyperparameter for adam optimizer
 #  beta2 - hyperparameter for adam optimizer
-#  maxIter1 - maximum iterations before adam optimizer is forcefully stopped
+#  maxIter - maximum iterations before adam optimizer is forcefully stopped
 #  eps - term to avoid dividing by zero for adam optimizer
-#  delta1 - convergence threshold for adam optimizer
 # Output:
-#  rsl object, but with added rules
-learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
-                       onlyPositiveRules = FALSE, 
-                       batchsize = 20, alpha = 0.002, beta1 = 0.9, beta2 = 0.999,
-                       maxIter1 = 10000, delta1 = 1e-6, eps = 1e-8){
-  # TODO: Implement (low priority)
-  # TODO: Allow rsl to have existing rules and use them as starting point
-  # TODO: Allow to auto-tune the nRules by setting it to NA
-  # TODO: Implement method "joint loss"
-  # TODO: Make less restrictions on the actual input and impute if possible
-  # TODO: check that actual is in a correct format
-  # TODO: Make the gradient descent work with incomplete data
-  
-  if(nrow(getRules(rsl)) > 0){
-    stop("The rsl object must not have any rules in it already.")
-  }
-  if(nrow(prior) != nrow(actual)){
-    stop("Unequal number of observations in prior and actual.")
-  }
-  batchsize <- min(nrow(actual), batchsize)
-  
-  # Convert the classifier priors into the actual-label priors
-  # (which corresponds to predicting without any rules)
-  cat("Preparing data...")
-  prior <- predict(rsl, prior)
-  
+#  a numeric vector giving the 
+.findOptJointRule <- function(rsl, prior, actual, nRules, standardOrder,
+                              batchsize, alpha, beta1, beta2, eps, maxIter){
   # Adam optimizer
   # The goal is to find the best "joint rule" that produces the best 
   # a-posteriori probabilities for the given inputs.
   cat("Finding best joint rule...")
-  standardOrder <- .generateStandardOrder(rsl)
   # TODO: Start with random weights or with 0.5^L?
   weights <- rep(0.5^nRules, nrow(standardOrder))
   # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
@@ -942,27 +919,40 @@ learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
     weights <- newWeights
     
     cat("Diff:", diff, ", relDiff:", relDiff, "logLik:", logLik, "\n")
-    temp <- list(weights = weights, diff = diff, relDiff = relDiff, logLik = logLik)
-    save(temp, file = paste0("gradDesc", t, ".RData"))
+    # temp <- list(weights = weights, diff = diff, relDiff = relDiff, logLik = logLik)
+    # save(temp, file = paste0("gradDesc", t, ".RData"))
     
     t <- t + 1
-    if(diff < delta1){
-      cat("Converged.\n")
-      break
-    }
-    if(t > maxIter1){
-      cat("Reached maxiter1 without converging.\n")
+    # if(diff < delta1){
+    #   cat("Converged.\n")
+    #   break
+    # }
+    if(t > maxIter){
+      cat("Reached maxIter without converging.\n")
       break
     } 
   }
   
-  
-  # Split the joint rule into local rules
-  # Find rules such that the weights generated
-  # by that rule set is as similar as possible to the gradient descent weights
-  # -> why cos distance? Because it ignores the vector's length and only direction counts
-  #    (and the BN always normalizes the weights - so to say - too because of 
-  #    the normalization over the sum of all combinations)
+  return(weights)
+}
+
+# .splitJointRule - Splits the joint rule into local rules.
+#                   Find rules such that the weights generated by that rule set 
+#                   is as similar as possible to given joint rule weights
+# Input:
+#  rsl - an rsl object
+#  weights - the weights vector of the joint rule
+#  nRules - integer giving the desired number of local rules
+#  standardOrder - as generated by .generateStandardOrder() (given as argument
+#                  to avoid duplicated generation)
+# onlyPositiveRules - logical whether all local rules should be forced to have a 
+#                     probability of > 0.5
+# Output:
+#  a list where each entry is a list consisting of
+#    ruleHead - the labels that are in the rule head
+#    p - the probability of the rule
+#    weights - the vector of rule weights in standard order
+.splitJointRule <- function(rsl, weights, nRules, standardOrder, onlyPositiveRules){
   cat("Splitting joint rule into", nRules, "local rules...")
   # start with non-informative rules. 
   rules <- list()
@@ -976,9 +966,13 @@ learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
                           weights = rep(0.5, nrow(standardOrder)))
   }
   
+  # Greedy local rule extraction:
   pLower <- ifelse(onlyPositiveRules, 0.5, 0)
   rulesWeights <- rep(0.5^nRules, nrow(standardOrder))
   bestSimilarity <- .cosSimilarity(rulesWeights, weights)
+  # -> why cos distance? Because it ignores the vector's length and only direction counts
+  #    (and the BN always normalizes the weights - so to say - too because of 
+  #    the normalization over the sum of all combinations)
   # For each rule (greedy)
   for(rule in seq(nRules)){
     cat("Rule", rule, "...")
@@ -1024,11 +1018,70 @@ learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
     }
   }
   
+  return(rules)
+}
+
+
+# learnRules - learns rules for an rsl object in order to maximize an 
+#              a-posteriori loss given data
+# Input:
+#  rsl - an rsl object without any rules yet (existing rules will be deleted)
+#  prior - a dataframe where each column corresponds to a label and gives the 
+#          probability  of that label (not all labels have to be given, NA are allowed)
+#  actual - a dataframe where each column corresponds to a label node (!) and 
+#           gives its correct label (all nodes have to be given, NAs are not allowed)
+#           So, it has to has as many columns as there are label groups.
+#  nRules - the desired number of rules to be learned
+#  method - "hamming" for optimizing the a-posteriori hamming loss
+#  onlyPositiveRules - logical indicating whether only rules with p in [0.5, 1] 
+#                      should be searched (TRUE) or with p in [0, 1] (FALSE).
+#                      The former is easier to interpret, the latter will have
+#                      better prediction accuracy.
+#  batchsize - batchsize for adam optimizer
+#  alpha - hyperparameter for adam optimizer
+#  beta1 - hyperparameter for adam optimizer
+#  beta2 - hyperparameter for adam optimizer
+#  maxIter1 - maximum iterations before adam optimizer is forcefully stopped
+#  eps - term to avoid dividing by zero for adam optimizer
+#  delta1 - convergence threshold for adam optimizer
+# Output:
+#  rsl object, but with added rules
+learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
+                       onlyPositiveRules = FALSE, 
+                       batchsize = 20, alpha = 0.002, beta1 = 0.9, beta2 = 0.999,
+                       maxIter1 = 10000, delta1 = 1e-6, eps = 1e-8){
+  # TODO: Allow rsl to have existing rules and use them as starting point
+  # TODO: Allow to auto-tune the nRules by setting it to NA
+  # TODO: Implement method "joint loss"
+  # TODO: Make less restrictions on the actual input and impute if possible
+  # TODO: check that actual is in a correct format
+  # TODO: Make the gradient descent work with incomplete data
   
+  if(nrow(getRules(rsl)) > 0){
+    stop("The rsl object must not have any rules in it already.")
+  }
+  if(nrow(prior) != nrow(actual)){
+    stop("Unequal number of observations in prior and actual.")
+  }
+  batchsize <- min(nrow(actual), batchsize)
+  
+  # Convert the classifier priors into the actual-label priors
+  # (which corresponds to predicting without any rules)
+  cat("Preparing data...")
+  prior <- predict(rsl, prior)
+  
+  # Apply Adam optimizer to find best weights for joint rule
+  standardOrder <- .generateStandardOrder(rsl)
+  weights <- .findOptJointRule(rsl, prior, actual, nRules, standardOrder, 
+                               batchsize, alpha, beta1, beta2, eps, maxIter1)
+  
+  # Split the joint rule into local rules:
+  rules <- .splitJointRule(rsl, weights, nRules, standardOrder, onlyPositiveRules)
   
   # Build found rules into the rsl
   cat("\nAdding local rules to rsl...\n")
   for(rule in seq(nRules)){
+    # TODO: Refactor most of this into .splitJointRule()
     if(length(rules[[rule]]$ruleHead) == 0 | isTRUE(all.equal(rules[[rule]]$p, 0.5))){
       warning(paste0("Local rule ", rule, " is noninformative. Not adding this rule to rsl."))
     } else {
@@ -1124,6 +1177,10 @@ hammingLoss <- function(pred, actual, na.rm = TRUE){
   if(any(dim(pred) != dim(actual))){
     stop("pred and actual have different dimensions.")
   }
+  if(!all(colnames(pred) %in% colnames(actual)) | !all(colnames(actual) %in% colnames(pred))){
+    stop("pred and actual have different colnames.")
+  }
+  pred <- pred[, match(colnames(actual), colnames(pred))]
   
   return(mean(pred != actual, na.rm = na.rm))
 }
@@ -1144,6 +1201,48 @@ accuracy <- function(pred, actual, na.rm = TRUE){
   if(any(dim(pred) != dim(actual))){
     stop("pred and actual have different dimensions.")
   }
+  if(!all(colnames(pred) %in% colnames(actual)) | !all(colnames(actual) %in% colnames(pred))){
+    stop("pred and actual have different colnames.")
+  }
+  pred <- pred[, match(colnames(actual), colnames(pred))]
   
   return(mean(rowSums(pred == actual) == ncol(pred), na.rm = na.rm))
+}
+
+
+# .labelwiseLogLikelihood - given some predictions and actual labels, gives the
+#                          summed labelwise log-likelihood of the true labels
+# Input:
+#  pred - dataframe where each column is a label and includes its predicted 
+#         likelihood
+#  actual - dataframe where each column is a labelset and includes its true label
+#           per observation
+.labelwiseLogLikelihood <- function(pred, actual){
+  # TODO: Add type checks to make this a public function 
+  
+  logL <- numeric(nrow(pred))
+  for(i in seq(along = logL)){
+    logL[i] <- sum(log(pred[i, unlist(actual[i, ])]))
+  }
+  
+  return(logL)
+}
+
+
+# .labelwiseLikelihood - given some predictions and actual labels, gives the
+#                        summed labelwise likelihood of the true labels
+# Input:
+#  pred - dataframe where each column is a label and includes its predicted 
+#         likelihood
+#  actual - dataframe where each column is a labelset and includes its true label
+#           per observation
+.labelwiseLikelihood <- function(pred, actual){
+  # TODO: Add type checks to make this a public function 
+  
+  lik <- numeric(nrow(pred))
+  for(i in seq(along = lik)){
+    lik[i] <- sum(pred[i, unlist(actual[i, ])])
+  }
+  
+  return(lik)
 }
