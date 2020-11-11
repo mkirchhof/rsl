@@ -260,3 +260,24 @@ addJointRuleTest <- function(){
 }
 
 addJointRuleTest()
+
+simulateTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  rsl <- addRule(rsl, "tasty <- junkFood", prob = 0.8)
+  rsl <- addRule(rsl, "not_tasty <- meat", prob = 0.9)
+  rsl <- addRule(rsl, "meat, tasty <- junkFood", prob = 0.6)
+  
+  data <- simulate(rsl, n = 20)
+  
+  # Test that we receive a character dataframe of the correct dimensions
+  # (There is not really much more we can test due to randomness in simulation)
+  testthat::expect_equal(class(data), "data.frame")
+  testthat::expect_equal(nrow(data), 20)
+  testthat::expect_equal(ncol(data), 9)
+  testthat::expect_equal(unname(sapply(data, class)), rep("character", 9))
+}
+
+simulateTest()
