@@ -775,15 +775,15 @@ plot.rsl <- function(rsl){
 #           weighting (useful in big networks)
 #  type - "marginal" or "joint", whether the a-posteriori estimates should be
 #         marginal a-posteriori probabilities or joint MAP estimates
+#         Note: joint estimates will be 0/1 encoded and may have a long runtime
+#  showProgress - logical indicating whether progress should be printed to console
 # Output:
 #   a dataframe where each column gives the estimates of each label
-predict.rsl <- function(rsl, data, showProgress = FALSE){
+predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # TODO: Add type checks
   # TODO: Implement method "approximate"
-  # TODO: Implement type "joint"
   # TODO: Optionally also output the rule a-posteriori probabilities
-  type <- "marginal"
-  
+
   if(showProgress) cat("Compiling rsl...")
   rsl <- .compile(rsl)
   
@@ -791,7 +791,12 @@ predict.rsl <- function(rsl, data, showProgress = FALSE){
   dataList <- .preprocessData(rsl, data)
   
   # compute a-posteriori probabilities
-  labels <- unlist(getLabels(rsl))
+  labelNodes <- getLabels(rsl)
+  if(type == "joint"){
+    labelStart <- cumsum(sapply(labelNodes, length))
+    labelStart <- c(0, labelStart[-length(labelStart)])
+  }
+  labels <- unlist(labelNodes)
   post <- matrix(NA_real_, ncol = length(labels), nrow = nrow(data))
   colnames(post) <- labels
   rownames(post) <- rownames(data)
@@ -806,11 +811,19 @@ predict.rsl <- function(rsl, data, showProgress = FALSE){
     
     relevantNodes <- names(rsl$labels)
     est <- gRain::querygrain(rsl$compiledNet, nodes = relevantNodes, type = type)
-    # bring est to the order of labels
-    names(est) <- NULL
-    est <- unlist(est)
-    # TODO: Do this matching only once in the end to save runtime
-    est <- est[match(labels, names(est))]
+    if(type == "marginal"){
+      # bring est to the order of labels
+      names(est) <- NULL
+      est <- unlist(est)
+      # TODO: Do this matching only once in the end to save runtime
+      est <- est[match(labels, names(est))]
+    } else if(type == "joint"){
+      maxInd <- which(est == max(est), arr.ind = TRUE)[1, ]
+      # TODO: Do this only once in the end to save runtime
+      maxInd <- maxInd[match(names(labelNodes), names(maxInd))]
+      est <- rep(0, length(labels))
+      est[labelStart + maxInd] <- 1
+    }
     post[i, ] <- est
   }
   

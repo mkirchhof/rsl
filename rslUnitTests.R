@@ -151,7 +151,7 @@ predictTest <- function(){
                      grass = c(0.3, 0.1),
                      tree = c(0.2, 0.7),
                      bush = c(0.5, 0.2))
-  pred <- predict(rsl, data, method = "exact", type = "marginal")
+  pred <- predict(rsl, data, type = "marginal")
   
 }
 
@@ -182,6 +182,44 @@ predictTestNA <- function(){
 }
 
 predictTestNA()
+
+predictJointPosteriorTest <- function(){
+  # add a classificator with accuracy instead of confusion matrix
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "terminatorAI", labels = c("cat", "friend", "human"),
+                       accuracy = 0.98)
+  confMatr <- matrix(c(0.95, 0.01, 0.03,
+                       0, 0.8, 0.04,
+                       0.05, 0.19, 0.93), byrow = TRUE, ncol = 3)
+  l2 <- c("grass", "tree", "bush")
+  prior <- c(0.5, 0.3, 0.2)
+  rsl <- addClassifier(rsl, "weakLearner", labels = l2, prior = prior,
+                       confusionMatrix = confMatr)
+  rsl <- addRule(rsl, rule = "friend <- tree")
+  rsl <- addClassifier(rsl, "weather", labels = c("sunny", "cloudy"), accuracy = 1)
+  
+  data <- data.frame(cat = c(0.8, 0.25),
+                     friend = c(0.15, 0.5),
+                     human = c(0.05, 0.25),
+                     grass = c(0.3, 0.1),
+                     tree = c(0.2, 0.7),
+                     bush = c(0.5, 0.2),
+                     sunny = c(0.8, 0.3))
+  pred <- predict(rsl, data, type = "joint")
+  
+  expected <- data.frame("cat" = c(1, 0),
+                         "friend" = c(0, 1),
+                         "human" = c(0, 0),
+                         "grass" = c(0, 0),
+                         "tree" = c(0, 1),
+                         "bush" = c(1, 0),
+                         "sunny" = c(1, 0),
+                         "cloudy" = c(0, 1))
+  
+  testthat::expect_equivalent(pred, expected)
+}
+
+predictJointPosteriorTest()
 
 learnRulesTest <- function(){
   rsl <- createRSL()
