@@ -62,7 +62,7 @@ addRule <- function(rsl, rule, prob = 0.9){
   
   if(.ruleAlreadyExists(rsl, rule)){
     warning(paste0("Rule ", rule, " already exists in the rsl. ",
-                "Please adjust its prob instead of adding it multiple times. Skipping this rule."))
+                   "Please adjust its prob instead of adding it multiple times. Skipping this rule."))
     return(rsl)
   }
   # TODO: Add more type checks
@@ -575,27 +575,45 @@ plot.rsl <- function(rsl){
 }
 
 
+# .getAllRules - returns a character vector containing all rules by their ID
+.getAllRules <- function(rsl){
+  return(rsl$rules$ruleID)
+}
+
+
 # .getNewRuleID - returns an unused ID for a rule node (e.g. "R123")
 .getNewRuleID <- function(rsl){
-  rules <- rsl$rules$ruleID
+  rules <- .getAllRules(rsl)
   ruleIDs <- gsub("^R([[:digit:]]+)$", "\\1", rules)
   maxID <- max(c(0, as.integer(ruleIDs)))
   return(paste0("R", maxID + 1))
 }
 
 
+# .getAllLabelNodes - returns a character vector including all label group nodes
+.getAllLabelNodes <- function(rsl){
+  return(unname(sapply(rsl$labels, "[[", "id")))
+}
+
+
 # .getNewLabelID - returns an unused ID for a label node (e.g. "L123")
 .getNewLabelID <- function(rsl){
-  labels <- sapply(rsl$labels, "[[", "id")
+  labels <- .getAllLabelNodes(rsl)
   labelIDs <- gsub("^L([[:digit:]]+)$", "\\1", labels)
   maxID <- max(c(0, as.integer(labelIDs)))
   return(paste0("L", maxID + 1))
 }
 
 
+# .getAllClassifiers - returns a character vector including all classifier names
+.getAllClassifiers <- function(rsl){
+  return(unname(sapply(rsl$classifiers, "[[", "id")))
+}
+
+
 # .getNewClassifierID - returns an unused ID for a classifier node (e.g. "C123")
 .getNewClassifierID <- function(rsl){
-  classifiers <- sapply(rsl$classifiers, "[[", "id")
+  classifiers <- .getAllClassifiers(rsl)
   classifierIDs <- gsub("^C([[:digit:]]+)$", "\\1", classifiers)
   maxID <- max(c(0, as.integer(classifierIDs)))
   return(paste0("C", maxID + 1))
@@ -657,6 +675,12 @@ plot.rsl <- function(rsl){
 
 .IDtoRule <- function(rsl, id){
   return(rsl$rules$name[rsl$rules$ruleID == id])
+}
+
+
+.IDtoLabelNode <- function(rsl, id){
+  # TODO: Make the rsl actually save the label node names
+  return(rsl$labels[[id]]$id)
 }
 
 
@@ -785,6 +809,7 @@ predict.rsl <- function(rsl, data, showProgress = FALSE){
     # bring est to the order of labels
     names(est) <- NULL
     est <- unlist(est)
+    # TODO: Do this matching only once in the end to save runtime
     est <- est[match(labels, names(est))]
     post[i, ] <- est
   }
@@ -1245,4 +1270,61 @@ accuracy <- function(pred, actual, na.rm = TRUE){
   }
   
   return(lik)
+}
+
+
+# .colnamesIDtoNames - replaces the IDs that might be in the colnames of a 
+#                      dataframe to their corresponding names
+.colnamesIDtoNames <- function(rsl, data){
+  if(ncol(data) < 1){
+    return(data)
+  }
+  
+  for(i in seq(ncol(data))){
+    cur <- colnames(data)[i]
+    name <- c(.IDtoClassifier(rsl, cur), 
+              .IDtoLabelNode(rsl, cur),
+              .IDtoRule(rsl, cur))
+    if(sum(!is.null(name)) == 1){
+      cur <- name[!is.null(name)]
+    }
+    colnames(data)[i] <- cur
+  }
+  
+  return(data)
+}
+
+
+
+# simulate - samples observations from a given rsl
+# Input:
+#  rsl - an rsl object
+#  n - number of observations to simulate
+#  outputClassifiers - boolean indicating whether the classifier inputs should 
+#                      be included in the output
+#  outputLabels - boolean indicating whether the (true) labels should be included 
+#                 in the output
+#  outputRules - boolean indicating whether the active rules should be included 
+#                in the output
+# Output:
+#  a dataframe containing the simulated observations
+simulate <- function(rsl, n, outputClassifiers = TRUE, outputLabels = TRUE, 
+                     outputRules = TRUE){
+  # simulate data
+  rsl <- .compile(rsl)
+  rsl <- .setAuxEvidence(rsl)
+  data <- gRain::simulate.grain(rsl$compiledNet, n)
+  
+  # throw out variables the user did not request
+  outputVars <- character(0)
+  if(outputClassifiers) outputVars <- c(outputVars, .getAllClassifiers(rsl))
+  if(outputLabels) outputVars <- c(outputVars, .getAllLabelNodes(rsl))
+  if(outputRules) outputVars <- c(outputVars, .getAllRules(rsl))
+  data <- data[, outputVars]
+  
+  # make the dataframe a bit more user friendly
+  data <- .colnamesIDtoNames(rsl, data)
+  data[] <- lapply(data, as.character) # factors to character
+  
+  return(data)
 }
