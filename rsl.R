@@ -761,7 +761,7 @@ plot.rsl <- function(rsl){
 #  the imputed prior weights of the labels in that node for each observation
 .preprocessData <- function(rsl, data){
   # TODO: Make sure the output is in the correct order
-  # TODO: Currently removes all labels that are not connected to a classifier (high priority)
+  # TODO: Currently removes all labels that are not connected to a classifier (low priority)
   
   # match columns of data to classifiers (https://stackoverflow.com/a/51298361)
   labelIDs <- sapply(colnames(data), .labelsToClassifierID, rsl = rsl)
@@ -787,8 +787,16 @@ plot.rsl <- function(rsl){
   for(i in seq(along = dataList)){
     existingProb <- rowSums(dataList[[i]], na.rm = TRUE)
     nNA <- rowSums(is.na(dataList[[i]]))
+    
+    # If only some are missing, impute them with equal probability
     missingProb <- (1 - existingProb) / nNA
     missingData <- matrix(missingProb, nrow = nrow(dataList[[i]]), ncol = ncol(dataList[[i]]))
+    
+    # If all are missing, impute them with the classifier's prior
+    isAllNA <- nNA == ncol(dataList[[i]])
+    prior <- unlist(rsl$classifiers[[names(dataList)[i]]]$prior)
+    missingData[isAllNA, ] <- rep(prior, each = sum(isAllNA))
+    
     dataList[[i]][is.na(dataList[[i]])] <- missingData[is.na(dataList[[i]])]
   }
   
