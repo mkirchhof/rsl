@@ -14,7 +14,7 @@ createRSL <- function(){
   #         each entry contains the label names, the internal ID in the BN 
   #         and the prior
   # classifiers: list of lists. Each list contains a classifier's name, its
-  #              internal ID in the BN and its confusion matrix
+  #              internal ID in the BN, its confusion matrix and its prior
   # rules: dataframe containing a rules's name, probability, and the IDs of 
   #        the nodes representing the rule and its auxiliary node in the BN
   # bayesNet: the bnlearn object representing the network (always updated when
@@ -458,14 +458,9 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
     }
   }
   
-  # add to rsl$classifiers
-  cID <- .getNewClassifierID(rsl)
-  rsl$classifiers[[cID]] <- list(name = name,
-                                 id = cID,
-                                 confusionMatrix = confusionMatrix)
-  
   # add to rsl$bayesNet
   # build cpt for the classificator node
+  cID <- .getNewClassifierID(rsl)
   dimlist <- list(labels)
   names(dimlist)[1] <- cID
   # If the label prior is uniform, we can choose the classifier prior uniform, too
@@ -498,6 +493,12 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  # add to rsl$classifiers
+  rsl$classifiers[[cID]] <- list(name = name,
+                                 id = cID,
+                                 confusionMatrix = confusionMatrix,
+                                 prior = cPrior)
   
   return(rsl)
 }
@@ -554,6 +555,8 @@ plot.rsl <- function(rsl){
 .compile <- function(rsl){
   if(rsl$needsCompilation){
     rsl$compiledNet <- bnlearn::as.grain(rsl$bayesNet)
+    rsl$compiledNet <- gRain:::compile.grain(rsl$compiledNet)
+    rsl$needsCompilation <- FALSE
   }
   
   return(rsl)
@@ -698,20 +701,44 @@ plot.rsl <- function(rsl){
 .setAuxEvidence <- function(rsl){
   auxs <- .getAllAuxNodes(rsl)
   rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = auxs, 
-                                        states = rep("fulfilled", length(auxs)))
+                                        states = rep("fulfilled", length(auxs)),
+                                        propagate = FALSE)
   
   return(rsl)
 }
 
 
-# .setEvidence - sets (soft) evidence to all classifier inputs
+# .makeAuxEvidence - returns a list in the format for gRain::querygrain
+#                    to set all aux nodes to "fulfilled"
+.makeAuxEvidence <- function(rsl){
+  auxs <- .getAllAuxNodes(rsl)
+  auxList <- lapply(auxs, function(x) "fulfilled")
+  names(auxList) <- auxs
+  
+  return(auxList)
+}
+
+
+# .setEvidence - sets (soft) evidence to all classifier inputs by editing the
+#                internal compiled gRain network
 # Input:
 #  rsl - an rsl object
 #  evidence - a list where each entry corresponds to a classifier node and has a 
 #             1-row dataframe with probabilities of all labels of that node
 .setEvidence <- function(rsl, evidence){
-  ev <- lapply(evidence, function(x) unlist(x[1, ]))
-  rsl$compiledNet <- gRain::setCPT(rsl$compiledNet, ev)
+  # edit classifier cpts
+  rsl$compiledNet$cptlist[names(evidence)] <- lapply(evidence, function(x) as.array(as.matrix(x)))
+
+  # edit clique tree
+  cliques <- sapply(rsl$compiledNet$potential$pot_orig, function(x) names(dimnames(x))[1])
+  for(i in seq(along = evidence)){
+    cl <- which(cliques == names(evidence)[i])
+    dimnames <- dimnames(rsl$compiledNet$potential$pot_orig[[cl]])
+    newCPT <- t(rsl$classifiers[[names(evidence)[i]]]$confusionMatrix) * unlist(evidence[[i]])
+    dimnames(newCPT) <- dimnames
+    rsl$compiledNet$potential$pot_orig[[cl]] <- rsl$compiledNet$potential$pot_temp[[cl]] <-
+      newCPT
+  }
   
   return(rsl)
 }
@@ -719,8 +746,11 @@ plot.rsl <- function(rsl){
 
 # .removeEvidence - resets all evidence in the grain classifier
 .removeEvidence <- function(rsl){
-  # TODO: Implement this in a faster way
-  return(.compile(rsl))
+  # Reset all prior distributions of classifiers to their original state
+  priorList <- lapply(rsl$classifiers, "[[", "prior")
+  rsl <- .setEvidence(rsl, priorList)
+  
+  return(rsl)
 }
 
 
@@ -790,6 +820,10 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   if(showProgress) cat("Preprocessing data...")
   dataList <- .preprocessData(rsl, data)
   
+  # prepare for later:
+  rsl <- .setAuxEvidence(rsl)
+  relevantNodes <- names(rsl$labels)
+  
   # compute a-posteriori probabilities
   labelNodes <- getLabels(rsl)
   if(type == "joint"){
@@ -805,11 +839,12 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   for(i in seq(nrow(data))){
     if(showProgress) cat(i, "/", nrow(data), "\n")
     observation <- lapply(dataList, "[", i, , drop = FALSE) # argument left blank on purpose
-    rsl <- .removeEvidence(rsl)
-    rsl <- .setEvidence(rsl, observation)
-    rsl <- .setAuxEvidence(rsl)
     
-    relevantNodes <- names(rsl$labels)
+    # No need to remove the evidence, because in every iteration the same 
+    # classificator evidences will be overridden
+    #rsl <- .removeEvidence(rsl)
+    rsl <- .setEvidence(rsl, observation)
+    
     est <- gRain::querygrain(rsl$compiledNet, nodes = relevantNodes, type = type)
     if(type == "marginal"){
       # bring est to the order of labels
@@ -1325,7 +1360,6 @@ simulate <- function(rsl, n, outputClassifiers = TRUE, outputLabels = TRUE,
                      outputRules = TRUE){
   # simulate data
   rsl <- .compile(rsl)
-  rsl <- .setAuxEvidence(rsl)
   data <- gRain::simulate.grain(rsl$compiledNet, n)
   
   # throw out variables the user did not request
