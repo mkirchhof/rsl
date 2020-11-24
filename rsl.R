@@ -249,8 +249,128 @@ addRule <- function(rsl, rule, prob = 0.9){
 }
 
 
-removeRule <- function(rsl, rule){
-  # TODO: Implement (low priority)
+.preprocessInhProbs <- function(rsl, probs){
+  # match probs to labels (https://stackoverflow.com/a/51298361)
+  labelIDs <- sapply(names(probs), .labelToID, rsl = rsl)
+  probList <- split.default(probs, labelIDs)
+  
+  # check if the nodes contain all of their labels
+  # Add labels and re-order if necessary
+  for(i in seq(along = probList)){
+    allLabels <- .IDtoLabels(rsl, names(probList)[i])
+    order <- match(allLabels, names(probList[[i]]))
+    if(any(is.na(order))){
+      # add missing labels
+      missing <- setdiff(allLabels, names(probList[[i]]))
+      missingProbs <- rep(1, length(missing))
+      names(missingProbs) <- missing
+      probList[[i]] <- c(probList[[i]], missingProbs)
+      order <- match(allLabels, names(probList[[i]]))
+    }
+    probList[[i]] <- probList[[i]][order]
+  }
+  
+  return(probList)
+}
+
+
+# .buildNoisyORCPT - builds a noisy-OR cpt given a list of vectors that contain
+#                    the inhibition probs of each label
+.buildNoisyORCPT <- function(rID, probs){
+  nParents <- length(probs)
+  
+  # Create the dimlist
+  dimlist <- list()
+  dimlist[[1]] <- c("fulfilled", "not_fulfilled")
+  names(dimlist)[1] <- rID
+  for(i in seq(nParents)){
+    dimlist[[i + 1]] <- names(probs[[i]])
+    names(dimlist)[i + 1] <- names(probs)[i]
+  }
+  
+  # create CPT via noisy-or: P(R = 0 | L1, ... Ln) = prod((inhProb_{l_i})^{l_i})
+  cpt <- try(array(c(0, 1), dim = c(2, sapply(probs, length)), dimnames = dimlist))
+  combs <- expand.grid(probs)
+  probFalse <- exp(rowSums(log(combs)))
+  cpt <- array(c(rbind(1 - probFalse, probFalse)), dim = c(2, sapply(probs, length)), dimnames = dimlist)
+  
+  return(cpt)
+}
+
+
+# .addNoisyOR - adds a noisy-OR node to the rsl
+# Input:
+#  rsl - an rsl object
+#  inhProbs - a named numeric vector, where each name gives a label and the 
+#             number gives it inhibition probability (has to be in [0, 1])
+#  prob - the rule probability
+# Output:
+#  the updated rsl
+.addNoisyOR <- function(rsl, inhProbs, prob = 1){
+  # Add to rsl$rules
+  name <- paste0(names(inhProbs), " (", 1 - inhProbs, ")", collapse = " | ")
+  rID <- .getNewRuleID(rsl)
+  aID <- .getNewAuxID(rsl)
+  rsl$rules <- rbind(rsl$rules, 
+                     data.frame(name = name, prob = 1, ruleID = rID, auxID = aID,
+                                stringsAsFactors = FALSE))
+  
+  # build noisy or prob Table
+  # TODO: Somehow prevent adding a noisy OR by its CPT and do it differently
+  probList <- .preprocessInhProbs(rsl, inhProbs)
+  rProbTable <- .buildNoisyORCPT(rID, probList)
+  
+  # Build aux CPT
+  auxStates <- list(c("fulfilled", "not_fulfilled"))
+  names(auxStates) <- aID
+  ruleStates <- list(c("fulfilled", "not_fulfilled"))
+  names(ruleStates) <- rID
+  aProbTable <- array(c(prob, 1 - prob, 1 - prob, prob),
+                      dim = c(2, 2), dimnames = c(auxStates, ruleStates))
+  
+  # add rule and aux to rsl$bayesNet
+  tables <- lapply(rsl$bayesNet, "[[", "prob")
+  tables[[rID]] <- rProbTable
+  tables[[aID]] <- aProbTable
+  nodes <- c(bnlearn::nodes(rsl$bayesNet), rID, aID)
+  arcs <- rbind(bnlearn::arcs(rsl$bayesNet), 
+                cbind(names(probList), rID), 
+                c(rID, aID))
+  rsl$bayesNet <- bnlearn::empty.graph(nodes = nodes)
+  bnlearn::arcs(rsl$bayesNet) <- arcs
+  rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
+  rsl$needsCompilation <- TRUE
+  
+  return(rsl)
+}
+
+
+# removeRule - removes a rule with a given rule ID (something like R1, R2, ...)
+#              from an rsl
+removeRule <- function(rsl, rID){
+  if(!rID %in% .getAllRules(rsl)){
+    warning(paste("Rule", rID, "is not in the RSL. Skipping its removal."))
+    return(rsl)
+  }
+  
+  aID <- .ruleToAux(rsl, rID)
+  
+  # remove rule from rsl$rules
+  rsl$rules <- rsl$rules[rsl$rules$ruleID != rID, ]
+  
+  # remove rule and aux from rsl$bayesNet
+  tables <- lapply(rsl$bayesNet, "[[", "prob")
+  tables[[rID]] <- NULL
+  tables[[aID]] <- NULL
+  nodes <- setdiff(bnlearn::nodes(rsl$bayesNet), c(rID, aID))
+  arcs <- bnlearn::arcs(rsl$bayesNet)
+  arcs <- arcs[!(arcs[, 1] %in% c(rID, aID) | arcs[, 2] %in% c(rID, aID)), ]
+  rsl$bayesNet <- bnlearn::empty.graph(nodes = nodes)
+  bnlearn::arcs(rsl$bayesNet) <- arcs
+  rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
+  rsl$needsCompilation <- TRUE
+  
+  return(rsl)
 }
 
 
@@ -697,21 +817,37 @@ plot.rsl <- function(rsl){
 }
 
 
+.ruleToAux <- function(rsl, id){
+  return(rsl$rules$auxID[rsl$rules$ruleID == id])
+}
+
+
 # .setAuxEvidence - sets evidence of all auxiliary rule nodes to 1
-.setAuxEvidence <- function(rsl){
+.setAuxEvidence <- function(rsl, exclude = c(), propagate = FALSE){
   auxs <- .getAllAuxNodes(rsl)
+  auxs <- setdiff(auxs, exclude)
   rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = auxs, 
                                         states = rep("fulfilled", length(auxs)),
-                                        propagate = FALSE)
+                                        propagate = propagate)
   
+  return(rsl)
+}
+
+
+# .retractAuxEvidence - removes evidence from all auxiliary nodes
+.retractAuxEvidence <- function(rsl, propagate = FALSE){
+  auxs <- .getAllAuxNodes(rsl)
+  rsl$compiledNet <- gRain::retractEvidence(rsl$compiledNet, nodes = auxs,
+                                            propagate = propagate)
   return(rsl)
 }
 
 
 # .makeAuxEvidence - returns a list in the format for gRain::querygrain
 #                    to set all aux nodes to "fulfilled"
-.makeAuxEvidence <- function(rsl){
+.makeAuxEvidence <- function(rsl, exclude = c()){
   auxs <- .getAllAuxNodes(rsl)
+  auxs <- setdiff(auxs, exclude)
   auxList <- lapply(auxs, function(x) "fulfilled")
   names(auxList) <- auxs
   
@@ -726,9 +862,13 @@ plot.rsl <- function(rsl){
 #  evidence - a list where each entry corresponds to a classifier node and has a 
 #             1-row dataframe with probabilities of all labels of that node
 .setEvidence <- function(rsl, evidence){
+  if(length(evidence) == 0){
+    return(rsl)
+  }
+  
   # edit classifier cpts
   rsl$compiledNet$cptlist[names(evidence)] <- lapply(evidence, function(x) as.array(as.matrix(x)))
-
+  
   # edit clique tree
   cliques <- sapply(rsl$compiledNet$potential$pot_orig, function(x) names(dimnames(x))[1])
   for(i in seq(along = evidence)){
@@ -821,7 +961,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # TODO: Add type checks
   # TODO: Implement method "approximate"
   # TODO: Optionally also output the rule a-posteriori probabilities
-
+  
   if(showProgress) cat("Compiling rsl...")
   rsl <- .compile(rsl)
   
@@ -897,7 +1037,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  For a better intuition: standardOrder is a matrix. jointPrior, weights and
 #  the gradient are in the same order as the COLUMNS of that matrix. actual is
 #  in the order of the ROWS of that matrix.
-.computeGradientHamming <- function(weights, jointPrior, actual, standardOrder){
+.computeJointRuleGradient <- function(weights, jointPrior, actual, standardOrder){
   # TODO: re-check if this is implemented correctly (with Lena)
   grad <- rep(0, length(weights))
   logLik <- 0
@@ -979,10 +1119,10 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
         prod(prior[obs, colnames(prior) %in% x]))
       # This uses that labels are unique. If that is changed, we have to change
       # the computation of jointPrior here too
-      ham <- .computeGradientHamming(weights = weights, 
-                                     jointPrior = jointPrior, 
-                                     actual = unlist(actual[obs, ]),
-                                     standardOrder = standardOrder)
+      ham <- .computeJointRuleGradient(weights = weights, 
+                                       jointPrior = jointPrior, 
+                                       actual = unlist(actual[obs, ]),
+                                       standardOrder = standardOrder)
       logLik <- logLik + ham$logLik
       grad <- grad + ham$grad
     }
@@ -1103,7 +1243,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
-# learnRules - learns rules for an rsl object in order to maximize an 
+# learnRulesJointRule - learns rules for an rsl object in order to maximize an 
 #              a-posteriori loss given data
 # Input:
 #  rsl - an rsl object without any rules yet (existing rules will be deleted)
@@ -1127,10 +1267,10 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  delta1 - convergence threshold for adam optimizer
 # Output:
 #  rsl object, but with added rules
-learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
-                       onlyPositiveRules = FALSE, 
-                       batchsize = 20, alpha = 0.002, beta1 = 0.9, beta2 = 0.999,
-                       maxIter1 = 10000, delta1 = 1e-6, eps = 1e-8){
+.learnRulesJointRule <- function(rsl, prior, actual, nRules = 20, method = "hamming",
+                                 onlyPositiveRules = FALSE, 
+                                 batchsize = 20, alpha = 0.002, beta1 = 0.9, beta2 = 0.999,
+                                 maxIter1 = 10000, delta1 = 1e-6, eps = 1e-8){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
   # TODO: Implement method "joint loss"
@@ -1179,6 +1319,191 @@ learnRules <- function(rsl, prior, actual, nRules = 20, method = "hamming",
   }
   
   return(rsl)
+}
+
+
+# .computeNoisyORGradient - computes the gradient of hamming loss for an
+#                           rsl with noisy-or rules
+.computeNoisyORGradient <- function(rsl, inhProbs, actual){
+  # Compute gradient
+  grad <- matrix(NA, nrow = nrow(inhProbs), ncol = ncol(inhProbs))
+  isLabelCorrect <- colnames(inhProbs) %in% actual
+  for(rule in seq(nrow(inhProbs))){
+    # Condition the network on all other rules
+    aID <- rsl$rules$auxID[rule]
+    rsl <- .retractAuxEvidence(rsl)
+    rsl <- .setAuxEvidence(rsl, exclude = aID, propagate = TRUE)
+    
+    # est <- gRain::querygrain(rsl$compiledNet, nodes = relevantNodes, type = type)
+    # compute P(all labels = correct labels | other rules = 1, x)
+    pBefore <- gRain::pEvidence(rsl$compiledNet)
+    pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
+                                                  states = actual, propagate = TRUE))
+    pCorrect <- pAfter / pBefore
+    # compute P(rule = 1 | other rules = 1, x)
+    pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
+    
+    # compute P(each label | current rule = 0, all other rules = 1, x)
+    rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
+    pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
+    # TODO: Make sure this is always the same order as actual
+    pLabels <- pLabels[match(.getAllLabelNodes(rsl), names(pLabels))]
+    pLabels <- unlist(pLabels)
+    for(label in seq(ncol(inhProbs))){
+      pLabel <- pLabels[label]
+      # compute gradient
+      gr <- (1 - prod(inhProbs[rule, isLabelCorrect])) * pCorrect * pLabel * (1 - pRule) / 
+        (inhProbs[rule, label] * pRule^2)
+      if(isLabelCorrect[label]){
+        gr <- gr - pCorrect * prod(inhProbs[rule, isLabelCorrect]) /
+          (inhProbs[rule, label] * pRule) 
+      }
+      grad[rule, label] <- gr
+    }
+  }
+  
+  # Compute likelihood of correct labels
+  rsl <- .retractAuxEvidence(rsl)
+  rsl <- .setAuxEvidence(rsl, propagate = TRUE)
+  pBefore <- gRain::pEvidence(rsl$compiledNet)
+  pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
+                                                states = actual, propagate = TRUE))
+  lik <- pAfter / pBefore
+  
+  # Note that we have to use a "* (-1)" in order to have the gradient showing
+  # towards the steepest ascent (not descent), because we want to maximize 
+  # likelihood, not minimize it
+  grad <- -grad
+  
+  return(list(grad = grad,
+              lik = lik))
+}
+
+
+# . findOptNoisyOR - applies ADAM optimization to find optimal noisy-or rules
+# output:
+#  a matrix with nRules rows and each column gives a trigger prob per label
+.findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
+                            alpha, beta1, beta2, eps){
+  # TODO: This might not work if classifiers and label nodes have different labels
+  
+  # Adam optimizer
+  # The goal is to find the set inhibition probabilities for noisy-or node
+  # that produce the best a-posteriori probabilities for the given inputs.
+  # TODO: Start with random weights or with 1?
+  labels <- unlist(getLabels(rsl))
+  inhProbs <- matrix(runif(nRules * length(labels), 0.9, 0.999), nrow = nRules, ncol = length(labels))
+  colnames(inhProbs) <- labels
+  # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
+  t <- 1 # iteration
+  m <- 0 # momentum
+  v <- 0 # exponential moving average of squared gradients
+  repeat{
+    # Add the new noisy-or rules to the rsl
+    for(rule in .getAllRules(rsl)){
+      rsl <- removeRule(rsl, rule)
+    }
+    for(i in seq(nRules)){
+      rsl <- .addNoisyOR(rsl, inhProbs[i, ])
+    }
+    rsl <- .compile(rsl)
+    
+    # Compute the minibatch gradient:
+    selectedObs <- sample(nrow(prior[[1]]), batchsize)
+    grad <- rep(0, length(inhProbs))
+    logLik <- 0
+    for(obs in selectedObs){
+      # This uses that labels are unique. If that is changed, we have to change
+      # the computation of jointPrior here too
+      observation <- lapply(prior, "[", i, , drop = FALSE) # argument left blank on purpose
+      rsl <- .setEvidence(rsl, observation)
+      ham <- .computeNoisyORGradient(rsl,
+                                     inhProbs = inhProbs, 
+                                     actual = unlist(actual[obs, ]))
+      logLik <- logLik + log(ham$lik)
+      grad <- grad + ham$grad / ham$lik
+    }
+    logLik <- logLik / batchsize
+    grad <- grad
+    
+    m <- beta1 * m + (1 - beta1) * grad
+    v <- beta2 * v + (1 - beta2) * grad^2
+    mHat <- m / (1 - beta1^t)
+    vHat <- v / (1 - beta2^t)
+    # TODO: Is truncating to [0, 1] a good idea? We could also rescale to [0, 1].
+    #       or use activation functions
+    newProbs <- pmin(0.9999, pmax(0.0001, inhProbs - alpha / (sqrt(vHat) + eps) * mHat))
+    inhProbs[] <- newProbs
+    
+    cat("logLik:", logLik, "\n")
+    
+    t <- t + 1
+    if(t > maxIter){
+      cat("Reached maxIter without converging.\n")
+      break
+    } 
+  }
+  
+  return(inhProbs)
+}
+
+
+# .learnRulesNoisyOR - learns rules via the noisy-or algorithm
+.learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
+                               batchsize = 20, alpha = 0.002, beta1 = 0.9, 
+                               beta2 = 0.999, eps = 1e-8){
+  # TODO: Allow rsl to have existing rules and use them as starting point
+  # TODO: Allow to auto-tune the nRules by setting it to NA
+  # TODO: check that actual is in a correct format
+  # TODO: Make the gradient descent work with incomplete data
+  
+  if(nrow(getRules(rsl)) > 0){
+    stop("The rsl object must not have any rules in it already.")
+  }
+  if(nrow(prior) != nrow(actual)){
+    stop("Unequal number of observations in prior and actual.")
+  }
+  batchsize <- min(nrow(actual), batchsize)
+  
+  # Apply Adam optimizer to find best noisy OR rules
+  cat("Preprocessing data...\n")
+  prior <- .preprocessData(rsl, prior)
+  cat("Learning...\n")
+  probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
+                           alpha, beta1, beta2, eps)
+  
+  # Add the learned rules to the rsl
+  # TODO: Prune the learned rule into a "normal" rule
+  for(i in seq(nRules)){
+    rsl <- .addNoisyOR(rsl, probs[i, ])
+  }
+  
+  return(rsl)
+}
+
+
+# learnRules - learns rules for an rsl object in order to maximize an 
+#              a-posteriori loss given data
+# Input:
+#  rsl - an rsl object without any rules yet (existing rules will be deleted)
+#  prior - a dataframe where each column corresponds to a label and gives the 
+#          probability  of that label (not all labels have to be given, NA are allowed)
+#  actual - a dataframe where each column corresponds to a label node (!) and 
+#           gives its correct label (all nodes have to be given, NAs are not allowed)
+#           So, it has to has as many columns as there are label groups.
+#  nRules - the desired number of rules to be learned
+#  method - "noisyor" to learn rules via noisy or, 
+#           "jointRule" to learn via a joint rule
+# Output:
+#  rsl object, but with added rules
+learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500){
+  if(method == "jointRule"){
+    return(.learnRulesJointRule(rsl, prior, actual, nRules, maxIter1 = maxIter))
+  } else if(method == "noisyor"){
+    return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter))
+  } else {
+    stop(paste0("Method ", method, " is no known learning method."))
+  }
 }
 
 

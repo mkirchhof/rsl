@@ -222,7 +222,7 @@ predictJointPosteriorTest <- function(){
 
 predictJointPosteriorTest()
 
-learnRulesTest <- function(){
+learnRulesJointRuleTest <- function(){
   rsl <- createRSL()
   rsl <- addClassifier(rsl, "animal", c("cat", "dog", "mouse"), confusionMatrix = diag(3))
   rsl <- addClassifier(rsl, "claws", "clawsTrimmed", confusionMatrix = diag(2))
@@ -236,7 +236,7 @@ learnRulesTest <- function(){
                        L2 = c("clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed"),
                        L3 = c("pet", "pet", "pet", "dontPet", "dontPet", "pet", "dontPet", "pet", "dontPet", "pet"),
                        stringsAsFactors = FALSE)
-  rsl <- learnRules(rsl, prior = input, actual = actual, nRules = 4, onlyPositiveRules = TRUE)
+  rsl <- learnRules(rsl, prior = input, actual = actual, nRules = 4, method = "jointRule")
   pred <- predict(rsl, input)
   inputCrisp <- .probabilisticToCrispData(rsl, input, tieBreak = "first")
   predCrisp <- .probabilisticToCrispData(rsl, pred, tieBreak = "first")
@@ -246,7 +246,33 @@ learnRulesTest <- function(){
   (accPosterior <- accuracy(predCrisp, actual))
 }
 
-learnRulesTest()
+learnRulesJointRuleTest()
+
+learnRulesNoisyORTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "animal", c("cat", "dog", "mouse"), confusionMatrix = diag(3))
+  rsl <- addClassifier(rsl, "claws", "clawsTrimmed", confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "toPetOrNotToPet", c("pet", "dontPet"), confusionMatrix = diag(2))
+  input <- data.frame(cat = c(0.8, 0.4, 0.2, 0.1, 0.5, 0.2, 0.9, 1/3, 1/3, 0.7),
+                      dog = c(0.15, 0.4, 0.7, 0.2, 0.3, 0.8, 0.07, 1/3, 1/3, 0.2),
+                      mouse = c(0.05, 0.2, 0.1, 0.7, 0.2, 0, 0.03, 1/3, 1/3, 0.1),
+                      clawsTrimmed = c(0.99, 0.8, 0.5, 0.1, 0.5, 0.01, 0.05, 0.01, 0.5, 0.2),
+                      pet = c(0.5, 0.5, 0.5, 0.5, 0.8, 0.6, 0.05, 0.96, 0.01, 0.8))
+  actual <- data.frame(L1 = c("cat", "cat", "dog", "mouse", "cat", "dog", "cat", "dog", "mouse", "cat"),
+                       L2 = c("clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "not_clawsTrimmed", "clawsTrimmed", "not_clawsTrimmed"),
+                       L3 = c("pet", "pet", "pet", "dontPet", "dontPet", "pet", "dontPet", "pet", "dontPet", "pet"),
+                       stringsAsFactors = FALSE)
+  rsl <- learnRules(rsl, prior = input, actual = actual, nRules = 4, method = "noisyor")
+  pred <- predict(rsl, input)
+  inputCrisp <- .probabilisticToCrispData(rsl, input, tieBreak = "first")
+  predCrisp <- .probabilisticToCrispData(rsl, pred, tieBreak = "first")
+  (lossPrior <- hammingLoss(inputCrisp, actual))
+  (accPrior <- accuracy(inputCrisp, actual))
+  (lossPosterior <- hammingLoss(predCrisp, actual))
+  (accPosterior <- accuracy(predCrisp, actual))
+}
+
+learnRulesNoisyORTest()
 
 addJointRuleTest <- function(){
   # See if the added joint rule works just like manually multiplying weights
@@ -320,3 +346,70 @@ simulateTest <- function(){
 }
 
 simulateTest()
+
+removeRuleTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  rsl <- addRule(rsl, "tasty <- junkFood", prob = 0.8)
+  rsl <- addRule(rsl, "not_tasty <- meat", prob = 0.9)
+  
+  rsl2 <- addRule(rsl, "meat, tasty <- junkFood", prob = 0.6)
+  rsl2 <- removeRule(rsl2, "R3")
+  
+  testthat::expect_equal(rsl, rsl2)
+}
+
+removeRuleTest()
+
+removeRuleThatIsNotInRSLTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  rsl <- addRule(rsl, "tasty <- junkFood", prob = 0.8)
+  rsl <- addRule(rsl, "not_tasty <- meat", prob = 0.9)
+  
+  testthat::expect_warning(rsl2 <- removeRule(rsl, "R3"))
+  testthat::expect_equal(rsl, rsl2)
+}
+
+removeRuleThatIsNotInRSLTest()
+
+preprocessInhProbsTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  inhProbs <- c(tasty = 0.8, junkFood = 0.1)
+  
+  inhProbs <- .preprocessInhProbs(rsl, inhProbs)
+  
+  expected <- list(L1 = c(tasty = 0.8, not_tasty = 1),
+                   L3 = c(healthy = 1, junkFood = 0.1))
+  
+  testthat::expect_equal(inhProbs, expected)
+}
+
+preprocessInhProbsTest()
+
+addNoisyORTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood", "toxic"), accuracy = 1)
+  shouldEatProbs <- c(tasty = 0.2, not_tasty = 0.9, junkFood = 0.6, toxic = 1)
+  
+  rsl <- .addNoisyOR(rsl, shouldEatProbs)
+  
+  expected <- array(c(0.8, 0.2, 0.1, 0.9, 0.88, 0.12, 0.46, 0.54, 0.8, 0.2, 0.1, 0.9),
+                    dim = c(2, 2, 3), dimnames = list(R1 = c("fulfilled", "not_fulfilled"),
+                                                      L1 = c("tasty", "not_tasty"),
+                                                      L3 = c("healthy", "junkFood", "toxic")))
+  expected <- as.table(expected)
+  
+  testthat::expect_equivalent(rsl$bayesNet$R1$prob, expected)
+}
+
+addNoisyORTest()
