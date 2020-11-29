@@ -1243,8 +1243,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
-# learnRulesJointRule - learns rules for an rsl object in order to maximize an 
-#              a-posteriori loss given data
+# .learnRulesJointRule - learns rules for an rsl object in order to maximize an 
+#                        a-posteriori loss given data
 # Input:
 #  rsl - an rsl object without any rules yet (existing rules will be deleted)
 #  prior - a dataframe where each column corresponds to a label and gives the 
@@ -1322,6 +1322,12 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
+# .logActivation - returns the logistic activation function f(x) = 1 / (1 + e^-x)
+.logActivation <- function(x){
+  return(1 / (1 + exp(-x)))
+}
+
+
 # .computeNoisyORGradient - computes the gradient of hamming loss for an
 #                           rsl with noisy-or rules
 .computeNoisyORGradient <- function(rsl, inhProbs, actual){
@@ -1341,6 +1347,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
                                                   states = actual, propagate = TRUE))
     pCorrect <- pAfter / pBefore
     # compute P(rule = 1 | other rules = 1, x)
+    # TODO: This only works as long as the rule's p is 1, 
+    #       else the marginals of aID and rID are different
     pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
     
     # compute P(each label | current rule = 0, all other rules = 1, x)
@@ -1384,7 +1392,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 # output:
 #  a matrix with nRules rows and each column gives a trigger prob per label
 .findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
-                            alpha, beta1, beta2, eps){
+                            alpha, beta1, beta2, eps, initValues){
   # TODO: This might not work if classifiers and label nodes have different labels
   
   # Adam optimizer
@@ -1392,7 +1400,11 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # that produce the best a-posteriori probabilities for the given inputs.
   # TODO: Start with random weights or with 1?
   labels <- unlist(getLabels(rsl))
-  inhProbs <- matrix(runif(nRules * length(labels), 0.9, 0.999), nrow = nRules, ncol = length(labels))
+  if(!is.null(initValues) && nrow(initValues) == nRules && ncol(initValues) == length(labels)){
+    inhProbs <- initValues
+  } else {
+    inhProbs <- matrix(runif(nRules * length(labels), 0.0001, 0.999), nrow = nRules, ncol = length(labels))
+  }
   colnames(inhProbs) <- labels
   # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
   t <- 1 # iteration
@@ -1415,7 +1427,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     for(obs in selectedObs){
       # This uses that labels are unique. If that is changed, we have to change
       # the computation of jointPrior here too
-      observation <- lapply(prior, "[", i, , drop = FALSE) # argument left blank on purpose
+      observation <- lapply(prior, "[", obs, , drop = FALSE) # argument left blank on purpose
       rsl <- .setEvidence(rsl, observation)
       ham <- .computeNoisyORGradient(rsl,
                                      inhProbs = inhProbs, 
@@ -1424,7 +1436,6 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
       grad <- grad + ham$grad / ham$lik
     }
     logLik <- logLik / batchsize
-    grad <- grad
     
     m <- beta1 * m + (1 - beta1) * grad
     v <- beta2 * v + (1 - beta2) * grad^2
@@ -1451,7 +1462,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 # .learnRulesNoisyOR - learns rules via the noisy-or algorithm
 .learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
                                batchsize = 20, alpha = 0.002, beta1 = 0.9, 
-                               beta2 = 0.999, eps = 1e-8){
+                               beta2 = 0.999, eps = 1e-8, initValues = NULL){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
   # TODO: check that actual is in a correct format
@@ -1470,7 +1481,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   prior <- .preprocessData(rsl, prior)
   cat("Learning...\n")
   probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
-                           alpha, beta1, beta2, eps)
+                           alpha, beta1, beta2, eps, initValues)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1494,13 +1505,25 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  nRules - the desired number of rules to be learned
 #  method - "noisyor" to learn rules via noisy or, 
 #           "jointRule" to learn via a joint rule
+#  batchsize - batchsize for adam optimizer
+#  alpha - hyperparameter for adam optimizer
+#  beta1 - hyperparameter for adam optimizer
+#  beta2 - hyperparameter for adam optimizer
+#  eps - term to avoid dividing by zero for adam optimizer
+#  initValues - matrix or vector of initial weights for the rule learners
 # Output:
 #  rsl object, but with added rules
-learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500){
+learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
+                       batchsize = 20, alpha = 0.002, beta1 = 0.9, 
+                       beta2 = 0.999, eps = 1e-8, initValues = NULL){
   if(method == "jointRule"){
-    return(.learnRulesJointRule(rsl, prior, actual, nRules, maxIter1 = maxIter))
+    return(.learnRulesJointRule(rsl, prior, actual, nRules, maxIter1 = maxIter,
+                                batchsize = batchsize, alpha = alpha, beta1 = beta1,
+                                beta2 = beta2, eps = eps))
   } else if(method == "noisyor"){
-    return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter))
+    return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter,
+                              batchsize = batchsize, alpha = alpha, beta1 = beta1,
+                              beta2 = beta2, eps = eps, initValues = initValues))
   } else {
     stop(paste0("Method ", method, " is no known learning method."))
   }
@@ -1651,6 +1674,43 @@ accuracy <- function(pred, actual, na.rm = TRUE){
   }
   
   return(lik)
+}
+
+
+# .likelihood - given an rsl, priors and actual labels, calulate the likelihood
+#               of the actual labels
+.likelihood <- function(rsl, prior, actual){
+  # TODO: implement type checks to make this a public function
+  rsl <- .compile(rsl)
+  
+  # Preprocess prior data
+  prior <- .preprocessData(rsl, prior)
+  
+  lik <- numeric(nrow(actual))
+  for(i in seq(along = lik)){
+    rsl <- .retractAuxEvidence(rsl)
+    observation <- lapply(prior, "[", i, , drop = FALSE) # argument left blank on purpose
+    rsl <- .setEvidence(rsl, observation)
+    
+    # Compute likelihood of correct labels
+    rsl <- .setAuxEvidence(rsl, propagate = TRUE)
+    pBefore <- gRain::pEvidence(rsl$compiledNet)
+    pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
+                                                  states = unlist(actual[i, ]), propagate = TRUE))
+    lik[i] <- pAfter / pBefore
+  }
+  
+  return(lik)
+}
+
+
+# .avgLogLikelihood - given an rsl, priors and actual labels, calculates the 
+#                     avg log Likelihood of the true labels.
+#                     NOTE: give priors and actuals, do not give predictions and actuals
+.avgLogLikelihood <- function(rsl, prior, actual){
+  logLik <- log(.likelihood(rsl, prior, actual))
+  logLik[logLik == -Inf] <- NA
+  return(mean(logLik, na.rm = TRUE))
 }
 
 
