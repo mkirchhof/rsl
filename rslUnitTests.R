@@ -413,3 +413,73 @@ addNoisyORTest <- function(){
 }
 
 addNoisyORTest()
+
+removeAllRulesTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  
+  rsl2 <- addRule(rsl, "tasty <- junkFood", prob = 0.8)
+  rsl2 <- addRule(rsl2, "not_tasty <- meat", prob = 0.9)
+  rsl2 <- .removeAllRules(rsl2)
+  
+  testthat::expect_equal(rsl, rsl2)
+}
+
+removeAllRulesTest()
+
+removeAllRulesNoRulesTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood"), confusionMatrix = diag(2))
+  
+  rsl2 <- .removeAllRules(rsl)
+  
+  testthat::expect_equal(rsl, rsl2)
+}
+
+removeAllRulesNoRulesTest()
+
+addAllNoisyORtest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood", "toxic"), accuracy = 1)
+  inhProbs <- as.matrix(data.frame(tasty = c(0.2, 1, 0.9), 
+                                   not_tasty = c(0.9, 1, 0.7), 
+                                   junkFood = c(0.6, 1, 1), 
+                                   toxic = c(1, 1, 1)))
+  
+  rsl <- .addAllNoisyOR(rsl, inhProbs)
+  rules <- getRules(rsl)
+  expected <- data.frame(name = c("tasty (0.8) | not_tasty (0.1) | junkFood (0.4)",
+                                  " ()",
+                                  "tasty (0.1) | not_tasty (0.3)"),
+                         prob = 1, stringsAsFactors = FALSE)
+  
+  testthat::expect_equal(rules, expected)
+}
+
+addAllNoisyORtest()
+
+addAllNoisyORNoRuletest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood", "toxic"), accuracy = 1)
+  inhProbs <- as.matrix(data.frame(tasty = 1, 
+                                   not_tasty = 1, 
+                                   junkFood = 1, 
+                                   toxic = 1))
+  
+  rsl <- .addAllNoisyOR(rsl, inhProbs)
+  rules <- getRules(rsl)
+  expected <- data.frame(name = c(" ()"),
+                         prob = 1, stringsAsFactors = FALSE)
+  
+  testthat::expect_equal(rules, expected)
+}
+
+addAllNoisyORNoRuletest()

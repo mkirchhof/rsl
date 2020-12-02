@@ -1,6 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 16.07.2020
+# Version: 0.2.0 "Bray and Pray"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -249,7 +250,13 @@ addRule <- function(rsl, rule, prob = 0.9){
 }
 
 
+# .preprocessInhProbs - takes a named vector of inhibition probs and turns it into
+#                       a list with all inhibition probs per label node
 .preprocessInhProbs <- function(rsl, probs){
+  if(length(probs) == 0){
+    return(list())
+  }
+  
   # match probs to labels (https://stackoverflow.com/a/51298361)
   labelIDs <- sapply(names(probs), .labelToID, rsl = rsl)
   probList <- split.default(probs, labelIDs)
@@ -283,16 +290,22 @@ addRule <- function(rsl, rule, prob = 0.9){
   dimlist <- list()
   dimlist[[1]] <- c("fulfilled", "not_fulfilled")
   names(dimlist)[1] <- rID
-  for(i in seq(nParents)){
+  for(i in seq(along = probs)){
     dimlist[[i + 1]] <- names(probs[[i]])
     names(dimlist)[i + 1] <- names(probs)[i]
   }
   
-  # create CPT via noisy-or: P(R = 0 | L1, ... Ln) = prod((inhProb_{l_i})^{l_i})
-  cpt <- try(array(c(0, 1), dim = c(2, sapply(probs, length)), dimnames = dimlist))
-  combs <- expand.grid(probs)
-  probFalse <- exp(rowSums(log(combs)))
-  cpt <- array(c(rbind(1 - probFalse, probFalse)), dim = c(2, sapply(probs, length)), dimnames = dimlist)
+  if(nParents > 0){
+    # create CPT via noisy-or: P(R = 0 | L1, ... Ln) = prod((inhProb_{l_i})^{l_i})
+    cpt <- try(array(c(0, 1), dim = c(2, sapply(probs, length)), dimnames = dimlist))
+    combs <- expand.grid(probs)
+    probFalse <- exp(rowSums(log(combs)))
+    cpt <- array(c(rbind(1 - probFalse, probFalse)), dim = c(2, sapply(probs, length)), dimnames = dimlist)
+  } else if(nParents == 0){
+    # If a noisy-or node has no parents, it is never activated. 
+    # Thus add an almost-zero Prior for P(R) (to avoid numeric problems)
+    cpt <- try(array(c(0.0001, 0.9999), dim = 2, dimnames = dimlist))
+  }
   
   return(cpt)
 }
@@ -334,12 +347,37 @@ addRule <- function(rsl, rule, prob = 0.9){
   tables[[aID]] <- aProbTable
   nodes <- c(bnlearn::nodes(rsl$bayesNet), rID, aID)
   arcs <- rbind(bnlearn::arcs(rsl$bayesNet), 
-                cbind(names(probList), rID), 
+                cbind(names(probList), rep(rID, length(probList))), 
                 c(rID, aID))
   rsl$bayesNet <- bnlearn::empty.graph(nodes = nodes)
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  return(rsl)
+}
+
+
+# .addAllNoisyOR - takes a matrix of inhibition probabilities for several 
+#                  noisy-or rules, preprocesses them (throws out unnecessary ones)
+#                  and adds them all to the rsl
+# Input:
+#  rsl - an rsl object
+#  inhProbs - a matrix of inhibition probabilities (in [0, 1]) 
+#             where each row is a rule and each column is a label. Columns need
+#             to be named
+# Output:
+#  the updated rsl object
+.addAllNoisyOR <- function(rsl, inhProbs){
+  if(nrow(inhProbs) == 0){
+    return(rsl)
+  }
+  
+  for(i in seq(nrow(inhProbs))){
+    probs <- inhProbs[i, ]
+    probs <- probs[probs != 1]
+    rsl <- .addNoisyOR(rsl, probs)
+  }
   
   return(rsl)
 }
@@ -369,6 +407,16 @@ removeRule <- function(rsl, rID){
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  return(rsl)
+}
+
+
+# .removeAllRules - removes all rules from an rsl
+.removeAllRules <- function(rsl){
+  for(rule in .getAllRules(rsl)){
+    rsl <- removeRule(rsl, rule)
+  }
   
   return(rsl)
 }
@@ -1403,7 +1451,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   if(!is.null(initValues) && nrow(initValues) == nRules && ncol(initValues) == length(labels)){
     inhProbs <- initValues
   } else {
-    inhProbs <- matrix(runif(nRules * length(labels), 0.0001, 0.999), nrow = nRules, ncol = length(labels))
+    inhProbs <- matrix(runif(nRules * length(labels), 0.9, 1), nrow = nRules, ncol = length(labels))
   }
   colnames(inhProbs) <- labels
   # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
@@ -1412,12 +1460,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   v <- 0 # exponential moving average of squared gradients
   repeat{
     # Add the new noisy-or rules to the rsl
-    for(rule in .getAllRules(rsl)){
-      rsl <- removeRule(rsl, rule)
-    }
-    for(i in seq(nRules)){
-      rsl <- .addNoisyOR(rsl, inhProbs[i, ])
-    }
+    rsl <- .removeAllRules(rsl)
+    rsl <- .addAllNoisyOR(rsl, inhProbs)
     rsl <- .compile(rsl)
     
     # Compute the minibatch gradient:
@@ -1433,7 +1477,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
                                      inhProbs = inhProbs, 
                                      actual = unlist(actual[obs, ]))
       logLik <- logLik + log(ham$lik)
-      grad <- grad + ham$grad / ham$lik
+      grad <- grad + ham$grad / max(ham$lik, eps)
     }
     logLik <- logLik / batchsize
     
@@ -1441,9 +1485,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     v <- beta2 * v + (1 - beta2) * grad^2
     mHat <- m / (1 - beta1^t)
     vHat <- v / (1 - beta2^t)
-    # TODO: Is truncating to [0, 1] a good idea? We could also rescale to [0, 1].
-    #       or use activation functions
-    newProbs <- pmin(0.9999, pmax(0.0001, inhProbs - alpha / (sqrt(vHat) + eps) * mHat))
+    # 0.00001 to prevent dividing by 0 when computing the gradient
+    newProbs <- pmin(1, pmax(0.00001, inhProbs - alpha / (sqrt(vHat) + eps) * mHat))
     inhProbs[] <- newProbs
     
     cat("logLik:", logLik, "\n")
@@ -1485,9 +1528,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
-  for(i in seq(nRules)){
-    rsl <- .addNoisyOR(rsl, probs[i, ])
-  }
+  rsl <- .addAllNoisyOR(rsl, probs)
   
   return(rsl)
 }
