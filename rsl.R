@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 16.07.2020
-# Version: 0.2.0 "Bray and Pray"
+# Version: 0.3.1 "Crazy Stupid Dove"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -260,6 +260,9 @@ addRule <- function(rsl, rule, prob = 0.9){
   # match probs to labels (https://stackoverflow.com/a/51298361)
   labelIDs <- sapply(names(probs), .labelToID, rsl = rsl)
   probList <- split.default(probs, labelIDs)
+  relLabels <- .getAllLabelNodes(rsl)
+  relLabels <- relLabels[relLabels %in% labelIDs]
+  probList <- probList[match(relLabels, names(probList))]
   
   # check if the nodes contain all of their labels
   # Add labels and re-order if necessary
@@ -954,6 +957,10 @@ plot.rsl <- function(rsl){
   # match columns of data to classifiers (https://stackoverflow.com/a/51298361)
   labelIDs <- sapply(colnames(data), .labelsToClassifierID, rsl = rsl)
   dataList <- split.default(data, labelIDs)
+  relLabels <- .getAllClassifiers(rsl)
+  relLabels <- relLabels[relLabels %in% labelIDs]
+  dataList <- dataList[match(relLabels, names(dataList))]
+  
   # check if the nodes contain all of their labels
   # Add labels and re-order if necessary
   for(i in seq(along = dataList)){
@@ -1376,11 +1383,154 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
+# .smoothMin - returns smoothed minimum of a number of values using logSumExp
+# Input:
+#  x - the values
+#  alpha - a factor indicating how sharp the smooth min should approximate the
+#          actual minimum (higher = sharper, closer to 0 = smoother)
+.smoothMin <- function(x, alpha = 20){
+  x <- -x
+  m <- max(x)
+  return(-(m + log(sum(exp((x - m) * alpha))) / alpha))
+}
+
+
+# .smoothArgMin - returns the smooth argmin (or derivation of .smoothMin)
+#                 (http://erikerlandson.github.io/blog/2018/05/28/computing-smooth-max-and-its-gradients-without-over-and-underflow/)
+# Input:
+#  x - the values
+#  alpha - a factor indicating how sharp the smooth min should approximate the
+#          actual minimum (higher = sharper, closer to 0 = smoother)
+.smoothArgMin <- function(x, alpha = 20){
+  x <- -x
+  m <- max(x)
+  exped <- exp((x - m) * alpha)
+  return((exped / sum(exped)))
+}
+
+
+# .splitProbs - splits a matrix of (inhibition) probs by the label the colnames
+#               belong to
+.splitProbs <- function(rsl, probs){
+  # match probs to labels (https://stackoverflow.com/a/51298361)
+  probs <- as.data.frame(probs) # so that it is treated as list for split.default
+  
+  labelIDs <- sapply(colnames(probs), .labelToID, rsl = rsl)
+  probList <- split.default(probs, labelIDs)
+  relLabels <- .getAllLabelNodes(rsl)
+  relLabels <- relLabels[relLabels %in% labelIDs]
+  probList <- probList[match(relLabels, names(probList))]
+  
+  return(probList)
+}
+
+
+# .gradSmoothMin - calculates the gradient of .smoothMin for a matrix of 
+#                  inhibition probs
+# Input: 
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  a matrix of the same size as probs containing the gradients
+.gradSmoothMin <- function(rsl, probs){
+  probList <- .splitProbs(rsl, probs)
+  probList <- lapply(probList, function(x) t(apply(x, 1, .smoothArgMin)))
+  grad <- do.call(cbind, probList)
+  
+  return(grad)
+}
+
+
+# .gradLinRegularizer - returns the gradient of the regularizer that punishes
+#                       inhibition probabilities linearly
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  a matrix of the same size as probs containing the gradients
+.gradLinRegularizer <- function(rsl, probs){
+  return(-.gradSmoothMin(rsl, probs))
+}
+
+
+# .linRegularizer - returns the value of the regularizer that punishes 
+#                   inhibition probs linearly
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  Numeric giving the regularizer penalty
+.linRegularizer <- function(rsl, probs){
+  probList <- .splitProbs(rsl, probs)
+  cost <- sum(1 - sapply(probList, function(x) apply(x, 1, .smoothMin)))
+  
+  return(cost)
+}
+
+
+# .gradNonLinRegularizer - returns the gradient of the regularizer that punishes
+#                          inhibition probabilities non-linearly
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  a matrix of the same size as probs containing the gradients
+.gradNonLinRegularizer <- function(rsl, probs){
+  gradF <- function(x){2 * x}
+  g <- function(x){1 - x^4}
+  gradG <- function(x){-4 * x^3}
+  
+  # prepare argmin and min
+  probList <- .splitProbs(rsl, probs)
+  argMin <- lapply(probList, function(x) t(apply(x, 1, .smoothArgMin)))
+  min <- lapply(probList, function(x) apply(x, 1, .smoothMin))
+  
+  # compute g'(...) and transform into a matrix that we can multiply with argMin
+  gDeriv <- list()
+  for(i in seq(along = min)){
+    gDeriv[[i]] <- matrix(rep(gradG(min[[i]]), ncol(argMin[[i]])), ncol = ncol(argMin[[i]]))
+  }
+  gDeriv <- do.call(cbind, gDeriv)
+  
+  # compute f'(...)
+  fDeriv <- gradF(rowSums(do.call(cbind, lapply(min, g))))
+  
+  # grad = f'(...) * g'(...) * argMin
+  grad <- fDeriv * gDeriv * do.call(cbind, argMin)
+  
+  return(grad)
+}
+
+
+# .nonLinRegularizer - returns the value of the regularizer that punishes 
+#                      inhibition probs non-linearly
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  Numeric giving the regularizer penalty
+.nonLinRegularizer <- function(rsl, probs){
+  g <- function(x){1 - x^4}
+  f <- function(x){x^2}
+  
+  probList <- .splitProbs(rsl, probs)
+  cost <- do.call(cbind, lapply(probList, function(x) g(apply(x, 1, .smoothMin))))
+  cost <- sum(f(rowSums(cost)))
+  
+  return(cost)
+}
+
+
 # .computeNoisyORGradient - computes the gradient of hamming loss for an
 #                           rsl with noisy-or rules
 .computeNoisyORGradient <- function(rsl, inhProbs, actual){
   # Compute gradient
-  grad <- matrix(NA, nrow = nrow(inhProbs), ncol = ncol(inhProbs))
+  grad <- matrix(0, nrow = nrow(inhProbs), ncol = ncol(inhProbs))
   isLabelCorrect <- colnames(inhProbs) %in% actual
   for(rule in seq(nrow(inhProbs))){
     # Condition the network on all other rules
@@ -1399,22 +1549,25 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     #       else the marginals of aID and rID are different
     pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
     
-    # compute P(each label | current rule = 0, all other rules = 1, x)
-    rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
-    pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
-    # TODO: Make sure this is always the same order as actual
-    pLabels <- pLabels[match(.getAllLabelNodes(rsl), names(pLabels))]
-    pLabels <- unlist(pLabels)
-    for(label in seq(ncol(inhProbs))){
-      pLabel <- pLabels[label]
-      # compute gradient
-      gr <- (1 - prod(inhProbs[rule, isLabelCorrect])) * pCorrect * pLabel * (1 - pRule) / 
-        (inhProbs[rule, label] * pRule^2)
-      if(isLabelCorrect[label]){
-        gr <- gr - pCorrect * prod(inhProbs[rule, isLabelCorrect]) /
-          (inhProbs[rule, label] * pRule) 
+    # Make sure we do not divide by zero or so
+    if(pRule^2 > 0 && !is.nan(pCorrect)){
+      # compute P(each label | current rule = 0, all other rules = 1, x)
+      rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
+      pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
+      # TODO: Make sure this is always the same order as actual
+      pLabels <- pLabels[match(.getAllLabelNodes(rsl), names(pLabels))]
+      pLabels <- unlist(pLabels)
+      for(label in seq(ncol(inhProbs))){
+        pLabel <- pLabels[label]
+        # compute gradient
+        gr <- (1 - prod(inhProbs[rule, isLabelCorrect])) * pCorrect * pLabel * (1 - pRule) / 
+          (inhProbs[rule, label] * pRule^2)
+        if(isLabelCorrect[label]){
+          gr <- gr - pCorrect * prod(inhProbs[rule, isLabelCorrect]) /
+            (inhProbs[rule, label] * pRule) 
+        }
+        grad[rule, label] <- gr
       }
-      grad[rule, label] <- gr
     }
   }
   
@@ -1425,6 +1578,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
                                                 states = actual, propagate = TRUE))
   lik <- pAfter / pBefore
+  lik <- ifelse(is.nan(lik), 0, lik)
   
   # Note that we have to use a "* (-1)" in order to have the gradient showing
   # towards the steepest ascent (not descent), because we want to maximize 
@@ -1436,29 +1590,66 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
-# . findOptNoisyOR - applies ADAM optimization to find optimal noisy-or rules
+# .truncProbs - limits the allowed number of label nodes per rule to a maximum 
+#               number and sets all other label nodes to zero
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+# Output:
+#  the modified probs matrix
+.truncProbs <- function(rsl, probs, maxLabels = 5){
+  probList <- .splitProbs(rsl, probs)
+  cost <- lapply(probList, function(x) apply(x, 1, .smoothMin))
+  # TODO implement
+}
+
+
+# . findOptNoisyOR - applies ADAM optimization to find the set inhibition 
+#                    probabilities for noisy-or node that produce the best 
+#                    a-posteriori probabilities for the given inputs
 # output:
-#  a matrix with nRules rows and each column gives a trigger prob per label
+#  a matrix with nRules rows and each column gives a inhibition prob per label
 .findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
-                            alpha, beta1, beta2, eps, initValues){
+                            alpha, beta1, beta2, eps, initValues, reg, lambda,
+                            initLabelsPerRule = 4){
   # TODO: This might not work if classifiers and label nodes have different labels
   
-  # Adam optimizer
-  # The goal is to find the set inhibition probabilities for noisy-or node
-  # that produce the best a-posteriori probabilities for the given inputs.
-  # TODO: Start with random weights or with 1?
+  # Generate start values
   labels <- unlist(getLabels(rsl))
   if(!is.null(initValues) && nrow(initValues) == nRules && ncol(initValues) == length(labels)){
     inhProbs <- initValues
   } else {
-    inhProbs <- matrix(runif(nRules * length(labels), 0.9, 1), nrow = nRules, ncol = length(labels))
+    inhProbs <- matrix(1, nrow = nRules, ncol = length(labels))
+    colnames(inhProbs) <- labels
+    inhProbs <- .splitProbs(rsl, inhProbs)
+    # For each rule, select initLabelsPerRule labels to have inhibition probs < 1
+    for(i in seq(nRules)){
+      if(initLabelsPerRule >= length(inhProbs)){
+        selectedLabels <- seq(length(inhProbs))
+      } else {
+        selectedLabels <- sample(length(inhProbs), initLabelsPerRule)
+      }
+      for(j in selectedLabels){
+        inhProbs[[j]][i, ] <- runif(ncol(inhProbs[[j]][i, ]), 0.9, 1)
+      }
+    }
+    inhProbs <- as.matrix(do.call(cbind, inhProbs))
   }
   colnames(inhProbs) <- labels
+  
   # Adam parameters as in https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
-  t <- 1 # iteration
+  t <- 0 # iteration
   m <- 0 # momentum
   v <- 0 # exponential moving average of squared gradients
+  avgLogLik <- -9
   repeat{
+    t <- t + 1
+    if(t > maxIter){
+      cat("Reached maxIter without converging.\n")
+      break
+    } 
+    
     # Add the new noisy-or rules to the rsl
     rsl <- .removeAllRules(rsl)
     rsl <- .addAllNoisyOR(rsl, inhProbs)
@@ -1476,11 +1667,27 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
       ham <- .computeNoisyORGradient(rsl,
                                      inhProbs = inhProbs, 
                                      actual = unlist(actual[obs, ]))
+      if(ham$lik == 0){
+        # Replace the likelihood to avoid overshooting and division by 0
+        ham$lik <- exp(avgLogLik)
+      }
       logLik <- logLik + log(ham$lik)
-      grad <- grad + ham$grad / max(ham$lik, eps)
+      grad <- grad + ham$grad / ham$lik
     }
-    logLik <- logLik / batchsize
+    avgLogLik <- logLik / batchsize
     
+    # Compute the regularizer gradient
+    regCost <- switch(reg,
+                      "none" = 0,
+                      "linear" = .linRegularizer(rsl, inhProbs),
+                      "nonlinear" = .nonLinRegularizer(rsl, inhProbs))
+    regGrad <- switch(reg,
+                      "none" = 0,
+                      "linear" = .gradLinRegularizer(rsl, inhProbs),
+                      "nonlinear" = .gradNonLinRegularizer(rsl, inhProbs))
+    
+    # Put the gradient into the ADAM formula
+    grad <- grad + lambda * regGrad
     m <- beta1 * m + (1 - beta1) * grad
     v <- beta2 * v + (1 - beta2) * grad^2
     mHat <- m / (1 - beta1^t)
@@ -1489,13 +1696,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     newProbs <- pmin(1, pmax(0.00001, inhProbs - alpha / (sqrt(vHat) + eps) * mHat))
     inhProbs[] <- newProbs
     
-    cat("logLik:", logLik, "\n")
-    
-    t <- t + 1
-    if(t > maxIter){
-      cat("Reached maxIter without converging.\n")
-      break
-    } 
+    cat(as.character(Sys.time()), "logLik:", avgLogLik, "regCost:", regCost, "\n")
+    print(inhProbs)
   }
   
   return(inhProbs)
@@ -1504,8 +1706,9 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 
 # .learnRulesNoisyOR - learns rules via the noisy-or algorithm
 .learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
-                               batchsize = 20, alpha = 0.002, beta1 = 0.9, 
-                               beta2 = 0.999, eps = 1e-8, initValues = NULL){
+                               batchsize = 20, alpha = 0.001, beta1 = 0.9, 
+                               beta2 = 0.999, eps = 1e-8, initValues = NULL,
+                               reg = "none", lambda = 1e-3){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
   # TODO: check that actual is in a correct format
@@ -1524,7 +1727,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   prior <- .preprocessData(rsl, prior)
   cat("Learning...\n")
   probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
-                           alpha, beta1, beta2, eps, initValues)
+                           alpha, beta1, beta2, eps, initValues, reg, lambda)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1552,11 +1755,15 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  beta2 - hyperparameter for adam optimizer
 #  eps - term to avoid dividing by zero for adam optimizer
 #  initValues - matrix or vector of initial weights for the rule learners
+#  reg - character giving whether to use no regularizer ("none"), the linear
+#        regularizer ("linear") or the nonlinear regularizer ("nonlinear")
+#  lambda - strength of regularizer
 # Output:
 #  rsl object, but with added rules
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
-                       batchsize = 20, alpha = 0.002, beta1 = 0.9, 
-                       beta2 = 0.999, eps = 1e-8, initValues = NULL){
+                       batchsize = 20, alpha = 0.001, beta1 = 0.9, 
+                       beta2 = 0.999, eps = 1e-8, initValues = NULL, 
+                       reg = "none", lambda = 1e-3){
   if(method == "jointRule"){
     return(.learnRulesJointRule(rsl, prior, actual, nRules, maxIter1 = maxIter,
                                 batchsize = batchsize, alpha = alpha, beta1 = beta1,
@@ -1564,7 +1771,8 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxI
   } else if(method == "noisyor"){
     return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter,
                               batchsize = batchsize, alpha = alpha, beta1 = beta1,
-                              beta2 = beta2, eps = eps, initValues = initValues))
+                              beta2 = beta2, eps = eps, initValues = initValues, 
+                              reg = reg, lambda = lambda))
   } else {
     stop(paste0("Method ", method, " is no known learning method."))
   }
