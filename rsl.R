@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 16.07.2020
-# Version: 0.3.1 "Crazy Stupid Dove"
+# Created: 04.12.2020
+# Version: 0.3.2 "Stayphone"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1333,14 +1333,6 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # TODO: check that actual is in a correct format
   # TODO: Make the gradient descent work with incomplete data
   
-  if(nrow(getRules(rsl)) > 0){
-    stop("The rsl object must not have any rules in it already.")
-  }
-  if(nrow(prior) != nrow(actual)){
-    stop("Unequal number of observations in prior and actual.")
-  }
-  batchsize <- min(nrow(actual), batchsize)
-  
   # Convert the classifier priors into the actual-label priors
   # (which corresponds to predicting without any rules)
   cat("Preparing data...")
@@ -1550,7 +1542,9 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
     
     # Make sure we do not divide by zero or so
-    if(pRule^2 > 0 && !is.nan(pCorrect)){
+    if(is.nan(pRule) || pRule^2 == 0 || pBefore == 0){
+      warning("Possible numeric instability while computing gradients.")
+    } else {
       # compute P(each label | current rule = 0, all other rules = 1, x)
       rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
       pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
@@ -1578,7 +1572,10 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
                                                 states = actual, propagate = TRUE))
   lik <- pAfter / pBefore
-  lik <- ifelse(is.nan(lik), 0, lik)
+  if(pBefore == 0){
+    warning("Possible numeric instability while computing gradients.")
+    lik <- ifelse(is.nan(lik), 0, lik)
+  }
   
   # Note that we have to use a "* (-1)" in order to have the gradient showing
   # towards the steepest ascent (not descent), because we want to maximize 
@@ -1591,17 +1588,37 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 
 
 # .truncProbs - limits the allowed number of label nodes per rule to a maximum 
-#               number and sets all other label nodes to zero
+#               number and sets all other label nodes' inhibition probs to 1
 # Input:
 #  rsl - an rsl object
 #  probs - a matrix containing inhibition probs per rule (row) and label (col).
 #          columns have to be named with their label.
+#  maxLabels - how many label nodes are allowed per Rule
+#  trunc - logical, should probs close to 1 be truncated to 1?
 # Output:
 #  the modified probs matrix
-.truncProbs <- function(rsl, probs, maxLabels = 5){
+.truncProbs <- function(rsl, probs, maxLabels = 5, trunc = TRUE){
+  # See which label nodes have the smallest inhProbs (per Rule)
   probList <- .splitProbs(rsl, probs)
-  cost <- lapply(probList, function(x) apply(x, 1, .smoothMin))
-  # TODO implement
+  minProb <- lapply(probList, function(x) apply(x, 1, min))
+  minProb <- do.call(cbind, minProb)
+  ranks <- t(apply(minProb, 1, rank, ties.method = "random"))
+  isSmall <- ranks <= maxLabels
+  
+  # Set the inhibition probs of all that are not small to 1
+  for(i in seq(along = probList)){
+    probList[[i]][!isSmall[, i], ] <- 1
+  }
+  
+  newProbs <- as.matrix(do.call(cbind, probList))
+  colnames(newProbs) <- colnames(probs)
+  
+  # Set all inhibition probs that are close to 1 to 1 to avoid numerical instability
+  if(trunc){
+    newProbs[newProbs > 0.99] <- 1
+  }
+  
+  return(newProbs)
 }
 
 
@@ -1612,23 +1629,28 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  a matrix with nRules rows and each column gives a inhibition prob per label
 .findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
                             alpha, beta1, beta2, eps, initValues, reg, lambda,
-                            initLabelsPerRule = 4){
+                            maxLabelsPerRule){
   # TODO: This might not work if classifiers and label nodes have different labels
   
   # Generate start values
-  labels <- unlist(getLabels(rsl))
+  labels <- getLabels(rsl)
+  nLabelNodes <- length(labels)
+  labels <- unlist(labels)
+  if(is.na(maxLabelsPerRule) || maxLabelsPerRule > nLabelNodes){
+    maxLabelsPerRule <- nLabelNodes
+  }
   if(!is.null(initValues) && nrow(initValues) == nRules && ncol(initValues) == length(labels)){
     inhProbs <- initValues
   } else {
     inhProbs <- matrix(1, nrow = nRules, ncol = length(labels))
     colnames(inhProbs) <- labels
     inhProbs <- .splitProbs(rsl, inhProbs)
-    # For each rule, select initLabelsPerRule labels to have inhibition probs < 1
+    # For each rule, select maxLabelsPerRule labels to have inhibition probs < 1
     for(i in seq(nRules)){
-      if(initLabelsPerRule >= length(inhProbs)){
+      if(maxLabelsPerRule >= length(inhProbs)){
         selectedLabels <- seq(length(inhProbs))
       } else {
-        selectedLabels <- sample(length(inhProbs), initLabelsPerRule)
+        selectedLabels <- sample(length(inhProbs), maxLabelsPerRule)
       }
       for(j in selectedLabels){
         inhProbs[[j]][i, ] <- runif(ncol(inhProbs[[j]][i, ]), 0.9, 1)
@@ -1648,7 +1670,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     if(t > maxIter){
       cat("Reached maxIter without converging.\n")
       break
-    } 
+    }
     
     # Add the new noisy-or rules to the rsl
     rsl <- .removeAllRules(rsl)
@@ -1696,8 +1718,12 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     newProbs <- pmin(1, pmax(0.00001, inhProbs - alpha / (sqrt(vHat) + eps) * mHat))
     inhProbs[] <- newProbs
     
-    cat(as.character(Sys.time()), "logLik:", avgLogLik, "regCost:", regCost, "\n")
-    print(inhProbs)
+    # set "almost 1" inhProbs to 1 to reduce computational workload
+    inhProbs <- .truncProbs(rsl, inhProbs, maxLabels = maxLabelsPerRule,
+                            trunc = FALSE)
+    
+    cat(as.character(Sys.time()), "logLik:", avgLogLik,"\n")#, "regCost:", regCost, "\n")
+    # print(inhProbs)
   }
   
   return(inhProbs)
@@ -1708,26 +1734,18 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 .learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
                                batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                                beta2 = 0.999, eps = 1e-8, initValues = NULL,
-                               reg = "none", lambda = 1e-3){
+                               reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
-  # TODO: check that actual is in a correct format
   # TODO: Make the gradient descent work with incomplete data
-  
-  if(nrow(getRules(rsl)) > 0){
-    stop("The rsl object must not have any rules in it already.")
-  }
-  if(nrow(prior) != nrow(actual)){
-    stop("Unequal number of observations in prior and actual.")
-  }
-  batchsize <- min(nrow(actual), batchsize)
   
   # Apply Adam optimizer to find best noisy OR rules
   cat("Preprocessing data...\n")
   prior <- .preprocessData(rsl, prior)
   cat("Learning...\n")
   probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
-                           alpha, beta1, beta2, eps, initValues, reg, lambda)
+                           alpha, beta1, beta2, eps, initValues, reg, lambda,
+                           maxLabelsPerRule)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1758,12 +1776,33 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  reg - character giving whether to use no regularizer ("none"), the linear
 #        regularizer ("linear") or the nonlinear regularizer ("nonlinear")
 #  lambda - strength of regularizer
+#  maxLabelsPerRule - integer giving the hard limit of how many label nodes may be
+#                     used per rule (as the computation cost rises exponentially).
+#                     Not capped if set to Inf.
 # Output:
 #  rsl object, but with added rules
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
-                       reg = "none", lambda = 1e-3){
+                       reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf){
+  # TODO: Add more type checks
+  
+  if(nrow(getRules(rsl)) > 0){
+    stop("The rsl object must not have any rules in it already.")
+  }
+  if(nrow(prior) != nrow(actual)){
+    stop("Unequal number of observations in prior and actual.")
+  }
+  # Check that actual is in a correct format
+  allLabels <- .getAllLabelNodes(rsl)
+  if(!is.data.frame(actual) ||
+     !setequal(allLabels, colnames(actual)) ||
+     !all(colnames(actual) == allLabels)){
+    stop("actual has a wrong format.")
+  }
+  
+  batchsize <- min(nrow(actual), batchsize)
+  
   if(method == "jointRule"){
     return(.learnRulesJointRule(rsl, prior, actual, nRules, maxIter1 = maxIter,
                                 batchsize = batchsize, alpha = alpha, beta1 = beta1,
@@ -1772,7 +1811,8 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxI
     return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter,
                               batchsize = batchsize, alpha = alpha, beta1 = beta1,
                               beta2 = beta2, eps = eps, initValues = initValues, 
-                              reg = reg, lambda = lambda))
+                              reg = reg, lambda = lambda, 
+                              maxLabelsPerRule = maxLabelsPerRule))
   } else {
     stop(paste0("Method ", method, " is no known learning method."))
   }
