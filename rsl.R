@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 04.12.2020
-# Version: 0.3.2 "Stayphone"
+# Created: 08.12.2020
+# Version: 0.3.3 "Phantom of the Op-R-a"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1709,7 +1709,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
                       "nonlinear" = .gradNonLinRegularizer(rsl, inhProbs))
     
     # Put the gradient into the ADAM formula
-    grad <- grad + lambda * regGrad
+    grad <- grad + batchsize * nLabelNodes * lambda * regGrad
     m <- beta1 * m + (1 - beta1) * grad
     v <- beta2 * v + (1 - beta2) * grad^2
     mHat <- m / (1 - beta1^t)
@@ -1775,7 +1775,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  initValues - matrix or vector of initial weights for the rule learners
 #  reg - character giving whether to use no regularizer ("none"), the linear
 #        regularizer ("linear") or the nonlinear regularizer ("nonlinear")
-#  lambda - strength of regularizer
+#  lambda - strength of regularizer. Increase to make rules smaller. 1 / lambda
+#           roughly gives the number of label nodes per rule.
 #  maxLabelsPerRule - integer giving the hard limit of how many label nodes may be
 #                     used per rule (as the computation cost rises exponentially).
 #                     Not capped if set to Inf.
@@ -1784,7 +1785,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
-                       reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf){
+                       reg = "none", lambda = 0.25, maxLabelsPerRule = Inf){
   # TODO: Add more type checks
   
   if(nrow(getRules(rsl)) > 0){
