@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 08.12.2020
-# Version: 0.3.3 "Phantom of the Op-R-a"
+# Version: 0.3.4 "Turn up the Bayes"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1518,6 +1518,56 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 }
 
 
+# .gradBetaRegularizer - returns the gradient of the regularizer that punishes
+#                        inhibition probabilities via a beta(alpha, beta) distribution
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+#  eps - constant to prevent dividing by 0
+#  alpha - parameter for underlying beta distribution
+#  beta - parameter for underlying beta distribution
+# Output:
+#  a matrix of the same size as probs containing the gradients
+.gradBetaRegularizer <- function(rsl, probs, eps = 1e-4, alpha = 0.15, beta = 0.6){
+  # prepare argmin and min
+  probList <- .splitProbs(rsl, probs)
+  argMin <- - do.call(cbind, lapply(probList, function(x) t(apply(x, 1, .smoothArgMin))))
+  min <- lapply(probList, function(x) apply(x, 1, .smoothMin))
+  min <- rep(min, times = sapply(probList, length))
+  min <- 1 - do.call(cbind, min)
+  
+  grad <- (alpha - 1) / (min + eps) * argMin - (beta - 1) / (1 - min + eps) * argMin
+  # we want to maximize the beta-likelihood, but ADAM minimizes, so take grad * (-1)
+  grad <- -grad
+  
+  return(grad)
+}
+
+
+# .betaRegularizer - returns the value of the regularizer that punishes 
+#                    inhibition probs via a beta(alpha, beta) distribution
+# Input:
+#  rsl - an rsl object
+#  probs - a matrix containing inhibition probs per rule (row) and label (col).
+#          columns have to be named with their label.
+#  eps - constant to prevent getting log(0)
+#  alpha - parameter for underlying beta distribution
+#  beta - parameter for underlying beta distribution
+# Output:
+#  Numeric giving the regularizer penalty
+.betaRegularizer <- function(rsl, probs, eps = 1e-4, alpha = 0.15, beta = 0.6){
+  probList <- .splitProbs(rsl, probs)
+  min <- 1 - sapply(probList, function(x) apply(x, 1, .smoothMin))
+  cost <- (alpha - 1) * sum(log(min + eps)) + (beta - 1) * sum(log(1 - min + eps))
+  # cost is a linear transformation of the likelihood, so higher = better.
+  # to make it smaller = better, take it * (-1)
+  cost <- -cost
+  
+  return(cost)
+}
+
+
 # .computeNoisyORGradient - computes the gradient of hamming loss for an
 #                           rsl with noisy-or rules
 .computeNoisyORGradient <- function(rsl, inhProbs, actual){
@@ -1629,7 +1679,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  a matrix with nRules rows and each column gives a inhibition prob per label
 .findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
                             alpha, beta1, beta2, eps, initValues, reg, lambda,
-                            maxLabelsPerRule){
+                            maxLabelsPerRule, alphaReg, betaReg){
   # TODO: This might not work if classifiers and label nodes have different labels
   
   # Generate start values
@@ -1702,14 +1752,16 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     regCost <- switch(reg,
                       "none" = 0,
                       "linear" = .linRegularizer(rsl, inhProbs),
-                      "nonlinear" = .nonLinRegularizer(rsl, inhProbs))
+                      "nonlinear" = .nonLinRegularizer(rsl, inhProbs),
+                      "beta" = .betaRegularizer(rsl, inhProbs, alphaReg, betaReg))
     regGrad <- switch(reg,
                       "none" = 0,
-                      "linear" = .gradLinRegularizer(rsl, inhProbs),
-                      "nonlinear" = .gradNonLinRegularizer(rsl, inhProbs))
+                      "linear" = batchsize * nLabelNodes * lambda * .gradLinRegularizer(rsl, inhProbs),
+                      "nonlinear" = batchsize * nLabelNodes * lambda * .gradNonLinRegularizer(rsl, inhProbs),
+                      "beta" = batchsize * lambda * .gradBetaRegularizer(rsl, inhProbs, alphaReg, betaReg))
     
     # Put the gradient into the ADAM formula
-    grad <- grad + batchsize * nLabelNodes * lambda * regGrad
+    grad <- grad + regGrad
     m <- beta1 * m + (1 - beta1) * grad
     v <- beta2 * v + (1 - beta2) * grad^2
     mHat <- m / (1 - beta1^t)
@@ -1723,7 +1775,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
                             trunc = FALSE)
     
     cat(as.character(Sys.time()), "logLik:", avgLogLik,"\n")#, "regCost:", regCost, "\n")
-    # print(inhProbs)
+    #print(inhProbs)
   }
   
   return(inhProbs)
@@ -1734,7 +1786,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 .learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
                                batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                                beta2 = 0.999, eps = 1e-8, initValues = NULL,
-                               reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf){
+                               reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf, 
+                               alphaReg = 0.15, betaReg = 0.6){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
   # TODO: Make the gradient descent work with incomplete data
@@ -1745,7 +1798,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   cat("Learning...\n")
   probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
                            alpha, beta1, beta2, eps, initValues, reg, lambda,
-                           maxLabelsPerRule)
+                           maxLabelsPerRule, alphaReg, betaReg)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1774,18 +1827,22 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  eps - term to avoid dividing by zero for adam optimizer
 #  initValues - matrix or vector of initial weights for the rule learners
 #  reg - character giving whether to use no regularizer ("none"), the linear
-#        regularizer ("linear") or the nonlinear regularizer ("nonlinear")
+#        regularizer ("linear"),the nonlinear regularizer ("nonlinear") or
+#        the beta-distribution based regularizer ("beta")
 #  lambda - strength of regularizer. Increase to make rules smaller. 1 / lambda
 #           roughly gives the number of label nodes per rule.
 #  maxLabelsPerRule - integer giving the hard limit of how many label nodes may be
 #                     used per rule (as the computation cost rises exponentially).
 #                     Not capped if set to Inf.
+#  alphaReg - hyperparameter for beta regularizer
+#  betaReg - hyperparameter for beta regularizer
 # Output:
 #  rsl object, but with added rules
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
-                       reg = "none", lambda = 0.25, maxLabelsPerRule = Inf){
+                       reg = "none", lambda = 0.25, maxLabelsPerRule = Inf, 
+                       alphaReg = 0.15, betaReg = 0.6){
   # TODO: Add more type checks
   
   if(nrow(getRules(rsl)) > 0){
@@ -1813,7 +1870,8 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxI
                               batchsize = batchsize, alpha = alpha, beta1 = beta1,
                               beta2 = beta2, eps = eps, initValues = initValues, 
                               reg = reg, lambda = lambda, 
-                              maxLabelsPerRule = maxLabelsPerRule))
+                              maxLabelsPerRule = maxLabelsPerRule,
+                              alphaReg, betaReg))
   } else {
     stop(paste0("Method ", method, " is no known learning method."))
   }
