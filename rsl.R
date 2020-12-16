@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 08.12.2020
-# Version: 0.4.0 "Works by chance"
+# Version: 0.4.1 "Masterade"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1021,22 +1021,19 @@ plot.rsl <- function(rsl){
 }
 
 
-# predict.rsl - computes a-posteriori estimates of all labels
+# .predictExact.rsl - computes a-posteriori estimates of all labels
 # Input:
 #  rsl - an rsl object
 #  data - a dataframe where each column corresponds to a label and gives the 
 #         probability  of that label (not all labels have to be given, NA are allowed)
-#  method - "exact" or "approximate" to use exact calculation or likelihood
-#           weighting (useful in big networks)
 #  type - "marginal" or "joint", whether the a-posteriori estimates should be
 #         marginal a-posteriori probabilities or joint MAP estimates
 #         Note: joint estimates will be 0/1 encoded and may have a long runtime
 #  showProgress - logical indicating whether progress should be printed to console
 # Output:
 #   a dataframe where each column gives the estimates of each label
-predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
+.predictExact.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # TODO: Add type checks
-  # TODO: Implement method "approximate"
   # TODO: Optionally also output the rule a-posteriori probabilities
   
   if(showProgress) cat("Compiling rsl...")
@@ -1088,6 +1085,40 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   }
   
   return(post)
+}
+
+
+# .predictExact.rsl - computes a-posteriori estimates of all labels
+# Input:
+#  rsl - an rsl object
+#  data - a dataframe where each column corresponds to a label and gives the 
+#         probability  of that label (not all labels have to be given, NA are allowed)
+#  method - "exact" or "approximate" to use exact calculation or pearls linear
+#           approximate algorithm (useful in big networks). Default ("auto")
+#           chooses exact for small and approximate for big networks
+#  type - "marginal" or "joint", whether the a-posteriori estimates should be
+#         marginal a-posteriori probabilities or joint MAP estimates
+#         Note: joint estimates will be 0/1 encoded and may have a long runtime
+#  showProgress - logical indicating whether progress should be printed to console
+# Output:
+#   a dataframe where each column gives the estimates of each label
+predict.rsl <- function(rsl, data, method = "auto", type = "marginal", 
+                        showProgress = FALSE){
+  if(method == "auto"){
+    labs <- getLabels(rsl)
+    size <- sum(log(sapply(labs, length)))
+    method <- ifelse(size <= 25, "exact", "approximate")
+  } else if(!method %in% c("exact", "approximate")){
+    stop('method must be one of "auto", "exact" or "approximate".')
+  }
+  
+  if(method == "exact"){
+    pred <- .predictExact.rsl(rsl, data, type, showProgress)
+  } else if(method == "approximate"){
+    pred <- predict.norn(rsl$norn, rsl, data, showProgress)
+  }
+  
+  return(pred)
 }
 
 
@@ -1592,61 +1623,56 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 
 # .computeNoisyORGradient - computes the gradient of hamming loss for an
 #                           rsl with noisy-or rules
-.computeNoisyORGradient <- function(rsl, inhProbs, actual){
+.computeNoisyORGradient <- function(rsl, inhProbs, actual, obs, exactness){
   # Compute gradient
   grad <- matrix(0, nrow = nrow(inhProbs), ncol = ncol(inhProbs))
   isLabelCorrect <- colnames(inhProbs) %in% actual
   for(rule in seq(nrow(inhProbs))){
     # Condition the network on all other rules
     aID <- rsl$rules$auxID[rule]
-    rsl <- .retractAuxEvidence(rsl)
-    rsl <- .setAuxEvidence(rsl, exclude = aID, propagate = TRUE)
+    if(exactness == "exact"){
+      rsl <- .retractAuxEvidence(rsl)
+      rsl <- .setAuxEvidence(rsl, exclude = aID, propagate = TRUE)
+    } else if(exactness == "approximate"){
+      auxs <- setdiff(.getAllAuxNodes(rsl), aID)
+      auxObs <- lapply(auxs, function(x) c(0, 1))
+      names(auxObs) <- auxs
+    }
     
-    # est <- gRain::querygrain(rsl$compiledNet, nodes = relevantNodes, type = type)
-    # compute P(all labels = correct labels | other rules = 1, x)
-    pBefore <- gRain::pEvidence(rsl$compiledNet)
-    pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
-                                                  states = actual, propagate = TRUE))
-    pCorrect <- pAfter / pBefore
     # compute P(rule = 1 | other rules = 1, x)
     # TODO: This only works as long as the rule's p is 1, 
     #       else the marginals of aID and rID are different
-    pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
+    if(exactness == "exact"){
+      pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
+    } else if(exactness == "approximate"){
+      pRule <- .beliefPropagation(rsl$norn, c(obs, auxObs), outNodes = aID)[[1]][2]
+    }
     
     # Make sure we do not divide by zero or so
-    if(is.nan(pRule) || pRule^2 == 0 || pBefore == 0){
+    if(is.nan(pRule) || pRule == 0){
       warning("Possible numeric instability while computing gradients.")
     } else {
       # compute P(each label | current rule = 0, all other rules = 1, x)
-      rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
-      pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
+      if(exactness == "exact"){
+        rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
+        pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
+      } else if(exactness == "approximate"){
+        pLabels <- .beliefPropagation(rsl$norn, c(obs, auxObs, list(aID = c(1, 0))), outNodes = .getAllLabelNodes(rsl))
+      }
       # TODO: Make sure this is always the same order as actual
       pLabels <- pLabels[match(.getAllLabelNodes(rsl), names(pLabels))]
       pLabels <- unlist(pLabels)
       for(label in seq(ncol(inhProbs))){
         pLabel <- pLabels[label]
         # compute gradient
-        gr <- (1 - prod(inhProbs[rule, isLabelCorrect])) * pCorrect * pLabel * (1 - pRule) / 
-          (inhProbs[rule, label] * pRule^2)
+        gr <- pLabel * (1 - pRule) / (inhProbs[rule, label] * pRule)
         if(isLabelCorrect[label]){
-          gr <- gr - pCorrect * prod(inhProbs[rule, isLabelCorrect]) /
-            (inhProbs[rule, label] * pRule) 
+          gr <- gr - prod(inhProbs[rule, isLabelCorrect]) /
+            ((1 - prod(inhProbs[rule, isLabelCorrect])) * inhProbs[rule, label]) 
         }
         grad[rule, label] <- gr
       }
     }
-  }
-  
-  # Compute likelihood of correct labels
-  rsl <- .retractAuxEvidence(rsl)
-  rsl <- .setAuxEvidence(rsl, propagate = TRUE)
-  pBefore <- gRain::pEvidence(rsl$compiledNet)
-  pAfter <- gRain::pEvidence(gRain::setEvidence(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), 
-                                                states = actual, propagate = TRUE))
-  lik <- pAfter / pBefore
-  if(pBefore == 0){
-    warning("Possible numeric instability while computing gradients.")
-    lik <- ifelse(is.nan(lik), 0, lik)
   }
   
   # Note that we have to use a "* (-1)" in order to have the gradient showing
@@ -1654,8 +1680,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   # likelihood, not minimize it
   grad <- -grad
   
-  return(list(grad = grad,
-              lik = lik))
+  return(grad)
 }
 
 
@@ -1699,7 +1724,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #                    a-posteriori probabilities for the given inputs
 # output:
 #  a matrix with nRules rows and each column gives a inhibition prob per label
-.findOptNoisyOR <- function(rsl, prior, actual, nRules, maxIter, batchsize, 
+.findOptNoisyOR <- function(rsl, prior, actual, nRules, exactness, maxIter, batchsize, 
                             alpha, beta1, beta2, eps, initValues, reg, lambda,
                             maxLabelsPerRule, alphaReg, betaReg){
   # TODO: This might not work if classifiers and label nodes have different labels
@@ -1736,7 +1761,6 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   t <- 0 # iteration
   m <- 0 # momentum
   v <- 0 # exponential moving average of squared gradients
-  avgLogLik <- -9
   repeat{
     t <- t + 1
     if(t > maxIter){
@@ -1747,28 +1771,29 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     # Add the new noisy-or rules to the rsl
     rsl <- .removeAllRules(rsl)
     rsl <- .addAllNoisyOR(rsl, inhProbs)
-    rsl <- .compile(rsl)
+    if(exactness == "exact"){
+      rsl <- .compile(rsl)
+    }
     
     # Compute the minibatch gradient:
     selectedObs <- sample(nrow(prior[[1]]), batchsize)
     grad <- rep(0, length(inhProbs))
-    logLik <- 0
     for(obs in selectedObs){
       # This uses that labels are unique. If that is changed, we have to change
       # the computation of jointPrior here too
       observation <- lapply(prior, "[", obs, , drop = FALSE) # argument left blank on purpose
-      rsl <- .setEvidence(rsl, observation)
-      ham <- .computeNoisyORGradient(rsl,
-                                     inhProbs = inhProbs, 
-                                     actual = unlist(actual[obs, ]))
-      if(ham$lik == 0){
-        # Replace the likelihood to avoid overshooting and division by 0
-        ham$lik <- exp(avgLogLik)
+      if(exactness == "exact"){
+        rsl <- .setEvidence(rsl, observation)
       }
-      logLik <- logLik + log(ham$lik)
-      grad <- grad + ham$grad / ham$lik
+      curGrad <- .computeNoisyORGradient(rsl,
+                                         inhProbs = inhProbs, 
+                                         actual = unlist(actual[obs, ]),
+                                         obs = observation,
+                                         exactness = exactness)
+      grad <- grad + curGrad
+      # We don't have to weight the current gradient by anything; that already
+      # happens inside .computeNoisyORGradient
     }
-    avgLogLik <- logLik / batchsize
     
     # Compute the regularizer gradient
     regCost <- switch(reg,
@@ -1796,7 +1821,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
     inhProbs <- .truncProbs(rsl, inhProbs, maxLabels = maxLabelsPerRule,
                             trunc = FALSE)
     
-    cat(as.character(Sys.time()), "logLik:", avgLogLik,"\n")#, "regCost:", regCost, "\n")
+    cat(as.character(Sys.time()), "\n")#, "regCost:", regCost, "\n")
     #print(inhProbs)
   }
   
@@ -1805,7 +1830,8 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 
 
 # .learnRulesNoisyOR - learns rules via the noisy-or algorithm
-.learnRulesNoisyOR <- function(rsl, prior, actual, nRules, maxIter = 500, 
+.learnRulesNoisyOR <- function(rsl, prior, actual, nRules, exactness = "approx", 
+                               maxIter = 500, 
                                batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                                beta2 = 0.999, eps = 1e-8, initValues = NULL,
                                reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf, 
@@ -1818,7 +1844,7 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
   cat("Preprocessing data...\n")
   prior <- .preprocessData(rsl, prior)
   cat("Learning...\n")
-  probs <- .findOptNoisyOR(rsl, prior, actual, nRules, maxIter, batchsize,
+  probs <- .findOptNoisyOR(rsl, prior, actual, nRules, exactness, maxIter, batchsize,
                            alpha, beta1, beta2, eps, initValues, reg, lambda,
                            maxLabelsPerRule, alphaReg, betaReg)
   
@@ -1842,6 +1868,9 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  nRules - the desired number of rules to be learned
 #  method - "noisyor" to learn rules via noisy or, 
 #           "jointRule" to learn via a joint rule
+#  exactness - "exact" to calculate exact gradients, "approx" to approximate via
+#              Pearls linear algorithm (same as in predict.rsl). "auto" to 
+#              automatically decide based on size of model
 #  batchsize - batchsize for adam optimizer
 #  alpha - hyperparameter for adam optimizer
 #  beta1 - hyperparameter for adam optimizer
@@ -1860,12 +1889,20 @@ predict.rsl <- function(rsl, data, type = "marginal", showProgress = FALSE){
 #  betaReg - hyperparameter for beta regularizer
 # Output:
 #  rsl object, but with added rules
-learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxIter = 500, 
+learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", 
+                       exactness = "auto", maxIter = 500, 
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
                        reg = "none", lambda = 0.25, maxLabelsPerRule = Inf, 
                        alphaReg = 0.15, betaReg = 0.6){
   # TODO: Add more type checks
+  if(exactness == "auto"){
+    labs <- getLabels(rsl)
+    size <- sum(log(sapply(labs, length)))
+    exactness <- ifelse(size <= 25, "exact", "approximate")
+  } else if(!exactness %in% c("exact", "approximate")){
+    stop('exactness must be one of "auto", "exact" or "approximate".')
+  }
   
   if(nrow(getRules(rsl)) > 0){
     stop("The rsl object must not have any rules in it already.")
@@ -1888,9 +1925,10 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", maxI
                                 batchsize = batchsize, alpha = alpha, beta1 = beta1,
                                 beta2 = beta2, eps = eps))
   } else if(method == "noisyor"){
-    return(.learnRulesNoisyOR(rsl, prior, actual, nRules, maxIter = maxIter,
-                              batchsize = batchsize, alpha = alpha, beta1 = beta1,
-                              beta2 = beta2, eps = eps, initValues = initValues, 
+    return(.learnRulesNoisyOR(rsl, prior, actual, nRules, exactness = exactness,
+                              maxIter = maxIter, batchsize = batchsize, 
+                              alpha = alpha, beta1 = beta1, beta2 = beta2, eps = eps, 
+                              initValues = initValues, 
                               reg = reg, lambda = lambda, 
                               maxLabelsPerRule = maxLabelsPerRule,
                               alphaReg, betaReg))
