@@ -1,12 +1,13 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 08.12.2020
-# Version: 0.3.4 "Turn up the Bayes"
+# Version: 0.4.0 "Works by chance"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
 # library(gRain) # for exact inference on bayesian networks
 # library(MASS) # for ginv()
+source("norn.R")
 
 
 # createRSL - creates an empty Rule Stacking Learner
@@ -34,6 +35,7 @@ createRSL <- function(){
                                  "auxID" = character(0),
                                  stringsAsFactors = FALSE),
               bayesNet = bn,
+              norn = create.norn(),
               compiledNet = NULL,
               needsCompilation = TRUE)
   class(rsl) <- "rsl"
@@ -129,6 +131,15 @@ addRule <- function(rsl, rule, prob = 0.9){
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  # add rule and aux to rsl$norn
+  # cast allowedStates to a list of inhProbs
+  inhProbs <- getLabels(rsl)
+  inhProbs <- inhProbs[names(allowedStates)]
+  for(i in seq(along = inhProbs)){
+    inhProbs[[i]] <- ifelse(inhProbs[[i]] %in% allowedStates[[i]], 0, 1)
+  }
+  rsl$norn <- .addRule.norn(rsl$norn, inhProbs, rID, aID, prob)
   
   return(rsl)
 }
@@ -332,7 +343,6 @@ addRule <- function(rsl, rule, prob = 0.9){
                                 stringsAsFactors = FALSE))
   
   # build noisy or prob Table
-  # TODO: Somehow prevent adding a noisy OR by its CPT and do it differently
   probList <- .preprocessInhProbs(rsl, inhProbs)
   rProbTable <- .buildNoisyORCPT(rID, probList)
   
@@ -356,6 +366,9 @@ addRule <- function(rsl, rule, prob = 0.9){
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  # add rule and aux to rsl$norn
+  rsl$norn <- .addRule.norn(rsl$norn, probList, rID, aID, prob)
   
   return(rsl)
 }
@@ -410,6 +423,9 @@ removeRule <- function(rsl, rID){
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  # remove rule from rsl$norn
+  rsl$norn <- .removeRule.norn(rsl$norn, rID)
   
   return(rsl)
 }
@@ -492,6 +508,9 @@ addLabels <- function(rsl, labels, prior = NA){
   bnlearn::arcs(rsl$bayesNet) <- arcs
   rsl$bayesNet <- bnlearn::custom.fit(rsl$bayesNet, tables)
   rsl$needsCompilation <- TRUE
+  
+  # add to rsl$norn
+  rsl$norn <- .addLabel.norn(rsl$norn, id, prior)
   
   return(rsl)
 }
@@ -670,6 +689,9 @@ addClassifier <- function(rsl, name, labels, confusionMatrix = NULL,
                                  id = cID,
                                  confusionMatrix = confusionMatrix,
                                  prior = cPrior)
+  
+  # add to rsl$norn
+  rsl$norn <- .addClassifier.norn(rsl$norn, cID, labelNode, confusionMatrix, cPrior)
   
   return(rsl)
 }
