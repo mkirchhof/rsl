@@ -5,17 +5,17 @@
 # that rsl.R hands over to it and performs no further type checks, assuming that
 # the inputs (given by rsl.R) are already type-checked.
 # Author: michael.kirchhof@udo.edu
-# Created: 14.12.2020
-# version: 0.2.0 "Synchrodancer"
+# Created: 16.12.2020
+# version: 0.2.1 "Bah Bah Bah"
 
 
 # create.norn - creates an empty noisyornetwork
 create.norn <- function(){
   norn <- list()
-  norn$classif <- list()
+  norn$classifs <- list()
   norn$labels <- list()
   norn$rules <- list()
-  norn$aux <- list()
+  norn$auxs <- list()
   class(norn) <- "norn"
   
   return(norn)
@@ -32,7 +32,7 @@ create.norn <- function(){
 
 # .addClassifier.norn - adds a classifier node to a norn
 .addClassifier.norn <- function(norn, cID, lID, confusionMatrix, prior){
-  norn$classif[[cID]] <- list(conf = confusionMatrix,
+  norn$classifs[[cID]] <- list(conf = confusionMatrix,
                               prior = prior,
                               children = lID)
   norn$labels[[lID]]$parents <- cID
@@ -88,14 +88,14 @@ as.norn.rsl <- function(rsl){
   # Add aux node and connect to rule node
   aCPT <- matrix(1 - p, nrow = 2, ncol = 2)
   diag(aCPT) <- p
-  norn$aux[[aID]] <- list(cpt = aCPT,
-                          parents = rID)
+  norn$auxs[[aID]] <- list(cpt = aCPT,
+                           parents = rID)
   
   # Add new rule
   norn$rules[[rID]] <- list()
   norn$rules[[rID]]$probs <- inhProbs
   norn$rules[[rID]]$parents <- names(inhProbs)
-  norn$rules[[aID]]$children <- aID
+  norn$rules[[rID]]$children <- aID
   
   # Connect to the label nodes
   for(p in norn$rules[[rID]]$parents){
@@ -115,74 +115,124 @@ as.norn.rsl <- function(rsl){
 .removeRule.norn <- function(norn, rID){
   aID <- norn$rules[[rID]]$children
   norn$rules[[rID]] <- NULL
-  norn$aux[[aID]] <- NULL
+  norn$auxs[[aID]] <- NULL
   
   return(norn)
 }
 
 
-# .predict.norn - given soft or crisp input on (some) label and rule nodes, 
-#                 returns posteriors of all nodes in the network using
-#                 loopy belief propagation
+# .beliefPropagation - given soft or crisp input on (some) label and rule nodes, 
+#                      returns posteriors of all nodes in the network using
+#                      loopy belief propagation
 #                 CAUTION: Does not do any error checking and expects complete input
 #                 CAUTION: May not converge and produce bad approximations
 # Inputs:
 #  norn - a noisyornetwork object
-#  input - a list where each element is named after a node in the network and
-#          contains a numeric vector for the initial beliefs of that node.
-#          For rule node, it is assumed that they come in the order
-#          c(not_fulfilled, fulfilled).
+#  input - a list where priors on classifiers and auxs can be specified. 
+#          entries are vectors giving priors for classifiers or c(0, 1) for aux.
+#          NOTE: for auxs, expects the order "not_fulfilled", "fulfilled", for
+#                classifiers their individual correct order
 #  maxit - maximum number of iterations to run the loopy belief propagation
 #  convThresh - if the beliefs of all variables change by at most this much 
 #               the algorithm is said to have converged
+#  outnodes - a character vector containing the node ids of the nodes whose 
+#             marginals shall be outputted (NULL means all nodes)
 # Output:
 #  a list just like input, but with the a-posteriori estimates
-.predict.norn <- function(norn, input, maxit = 20, convThresh = 1e-5){
-  rules <- names(norn$rules)
+.beliefPropagation <- function(norn, input, maxit = 20, convThresh = 1e-5, 
+                               outNodes = NULL){
+  classifs <- names(norn$classifs)
   labels <- names(norn$labels)
+  rules <- names(norn$rules)
+  auxs <- names(norn$auxs)
+  if(is.null(outNodes)){
+    outNodes <- c(classifs, labels, rules, auxs)
+  }
   
   # Initialize messages
   ownPi <- list()
-  for(r in rules){
-    ownPi[[r]] <- rep(1, 2)
-  }
-  for(l in labels){
-    ownPi[[l]] <- input[[l]]
-  }
-  
   ownLambda <- list()
-  for(r in rules){
-    ownLambda[[r]] <- input[[r]]
+  ownBel <- list()
+  piToFrom <- list()
+  lambdaToFrom <- list()
+  # Initialize all pi messages from label to aux
+  for(c in classifs){
+    if(!is.null(input[[c]])){
+      ownPi[[c]] <- unlist(input[[c]])
+    } else {
+      ownPi[[c]] <- norn$classifs[[c]]$prior
+    }
   }
   for(l in labels){
-    ownLambda[[l]] <- rep(1, length(ownPi[[l]]))
+    piToFrom[[l]] <- list()
+    c <- norn$labels[[l]]$parents
+    piToFrom[[l]][[c]] <- c(norn$classifs[[c]]$conf %*% ownPi[[c]])
   }
-  
-  ownBel <- list()
-  for(n in c(labels, rules)){
-    ownBel[[n]] <- ownLambda[[n]] * ownPi[[n]]
-    ownBel[[n]] <- ownBel[[n]] / sum(ownBel[[n]])
+  for(l in labels){
+    ownPi[[l]] <- Reduce("*", c(piToFrom[[l]][norn$labels[[l]]$parents], 
+                                list(rep(1, length(norn$labels[[l]]$prior)))))
   }
-  
-  piToFrom <- list()
   for(r in rules){
     piToFrom[[r]] <- list()
     for(l in norn$rules[[r]]$parents){
       piToFrom[[r]][[l]] <- ownPi[[l]]
     }
   }
+  for(r in c(auxs, rules)){
+    ownPi[[r]] <- rep(1, 2)
+  }
+  for(a in auxs){
+    piToFrom[[a]] <- list()
+    r <- norn$auxs[[a]]$parents
+    piToFrom[[a]][[r]] <- c(norn$auxs[[a]]$cpt %*% ownPi[[r]])
+  }
+  for(a in auxs){
+    r <- norn$auxs[[a]]$parents
+    ownPi[[a]] <- piToFrom[[a]][[r]]
+  }
   
-  lambdaToFrom <- list()
+  # Now, initialize the lambda messages from auxs to labels
+  for(a in auxs){
+    if(!is.null(input[[a]])){
+      ownLambda[[a]] <- unlist(input[[a]])
+    } else {
+      ownLambda[[a]] <- c(1, 1)
+    }
+  }
+  for(l in c(labels, classifs, rules)){
+    ownLambda[[l]] <- rep(1, length(ownPi[[l]]))
+  }
+  for(r in rules){
+    lambdaToFrom[[r]] <- list()
+    a <- norn$rules[[r]]$children
+    lambdaToFrom[[r]][[a]] <- c(norn$auxs[[a]]$cpt %*% ownLambda[[a]])
+  }
   for(l in labels){
     lambdaToFrom[[l]] <- list()
     for(r in norn$labels[[l]]$children){
       lambdaToFrom[[l]][[r]] <- rep(1, length(ownPi[[l]]))
     }
   }
+  for(c in classifs){
+    lambdaToFrom[[c]] <- list()
+    l <- norn$classifs[[c]]$children
+    lambdaToFrom[[c]][[l]] <- c(norn$classifs[[c]]$conf %*% ownLambda[[l]])
+  }
+  
+  # Compute initial own beliefs
+  for(n in c(classifs, labels, rules, auxs)){
+    ownBel[[n]] <- ownLambda[[n]] * ownPi[[n]]
+    ownBel[[n]] <- ownBel[[n]] / sum(ownBel[[n]])
+  }
   
   # Do the loopy belief propagation
   converged <- FALSE
   for(i in seq(maxit)){
+    # Do not need to send pi messages from classifiers to labels, because remains
+    # unchanged
+    
+    # Do not need to compute ownPi of labels, because remains unchanged
+    
     # Send pi messages from label nodes to rule nodes
     for(l in labels){
       for(r in norn$labels[[l]]$children){
@@ -191,7 +241,7 @@ as.norn.rsl <- function(rsl){
       }
     }
     
-    # send lambda messages from rule nodes to label nodes
+    # compute helping variables for the rule nodes
     prodParts <- matrix(1, nrow = length(rules), ncol = length(labels))
     colnames(prodParts) <- labels
     rownames(prodParts) <- rules
@@ -200,6 +250,38 @@ as.norn.rsl <- function(rsl){
         prodParts[r, l] <- sum(norn$rules[[r]]$probs[[l]] * piToFrom[[r]][[l]])
       }
     }
+    
+    # compute ownPi beliefs of rule nodes
+    for(r in rules){
+      prod <- prod(prodParts[r, ])
+      ownPi[[r]] <- c(prod, 1 - prod)
+    }
+    
+    # send pi messages from rules to auxs
+    for(r in rules){
+      a <- norn$rules[[r]]$children
+      piToFrom[[a]][[r]] <- c(norn$auxs[[a]]$cpt %*% ownBel[[r]])
+    }
+    
+    # compute ownPi messages of auxs
+    for(a in auxs){
+      r <- norn$auxs[[a]]$parents
+      ownPi[[a]] <- piToFrom[[a]][[r]]
+    }
+    
+    # send lambda message from auxs to rules
+    for(a in auxs){
+      r <- norn$auxs[[a]]$parents
+      lambdaToFrom[[r]][[a]] <- c(norn$auxs[[a]]$cpt %*% ownLambda[[a]])
+    }
+    
+    # compute ownLambda message of rule nodes
+    for(r in rules){
+      a <- norn$rules[[r]]$children
+      ownLambda[[r]] <- lambdaToFrom[[r]][[a]]
+    }
+    
+    # send lambda messages from rule nodes to label nodes
     for(r in rules){
       for(l in norn$rules[[r]]$parents){
         prod <- prod(prodParts[r, setdiff(norn$rules[[r]]$parents, l)])
@@ -209,33 +291,38 @@ as.norn.rsl <- function(rsl){
       }
     }
     
-    # compute ownPi beliefs
-    for(r in rules){
-      prod <- prod(prodParts[r, ])
-      ownPi[[r]] <- c(prod, 1 - prod)
-    }
-    
-    # compute ownLambda beliefs
+    # compute ownLambda beliefs of label nodes
     for(l in labels){
       ownLambda[[l]] <- Reduce("*", c(lambdaToFrom[[l]], list(rep(1, length(ownLambda[[l]])))))
     }
     
-    # compute ownBel beliefs
+    # send lambda messages from label nodes to classif nodes
+    for(c in classifs){
+      l <- norn$classifs[[c]]$children
+      lambdaToFrom[[c]][[l]] <- c(t(ownLambda[[l]]) %*% norn$classifs[[c]]$conf)
+    }
+    
+    # compute ownLambda of classifier nodes
+    for(c in classifs){
+      l <- norn$classifs[[c]]$children
+      ownLambda[[c]] <- lambdaToFrom[[c]][[l]]
+    }
+    
+    # compute ownBel beliefs of all nodes
     newOwnBel <- ownBel
-    for(n in c(labels, rules)){
+    for(n in c(classifs, labels, rules, auxs)){
       newOwnBel[[n]] <- ownPi[[n]] * ownLambda[[n]]
       newOwnBel[[n]] <- newOwnBel[[n]] / sum(newOwnBel[[n]])
     }
     
     # Check if beliefs are similar to previous iteration (then it has converged)
-    # TODO
     converged <- isTRUE(all.equal(ownBel, newOwnBel, tolerance = convThresh))
     ownBel <- newOwnBel
     if(converged) break
   }
   
   if(!converged) warning("Loopy belief propagation has not converged.")
-  return(ownBel)
+  return(ownBel[outNodes])
 }
 
 
@@ -243,13 +330,10 @@ as.norn.rsl <- function(rsl){
 predict.norn <- function(norn, rsl, data, showProgress = FALSE){
   if(showProgress) cat("Preprocessing data...")
   dataList <- .preprocessData(rsl, data)
-  for(i in seq(along = dataList)){
-    names(dataList)[i] <- .classifierIDtoLabelID(rsl, names(dataList)[i])
-  }
   
-  rules <- .getAllRules(rsl)
-  ruleObs <- lapply(rules, function(x) c(0, 1))
-  names(ruleObs) <- rules
+  auxs <- .getAllAuxNodes(rsl)
+  auxObs <- lapply(auxs, function(x) c(0, 1))
+  names(auxObs) <- auxs
   
   # compute a-posteriori probabilities
   labelNodes <- getLabels(rsl)
@@ -262,10 +346,9 @@ predict.norn <- function(norn, rsl, data, showProgress = FALSE){
   for(i in seq(nrow(data))){
     if(showProgress) cat(i, "/", nrow(data), "\n")
     observation <- lapply(dataList, "[", i, , drop = FALSE) # argument left blank on purpose
-    observation <- c(observation, ruleObs)
+    observation <- c(observation, auxObs)
     
-    est <- .predict.norn(norn, observation)
-    est[rules] <- NULL
+    est <- .beliefPropagation(norn, observation, outNodes = names(labelNodes))
     est <- unlist(est)
     
     post[i, ] <- est
