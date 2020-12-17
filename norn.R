@@ -5,8 +5,8 @@
 # that rsl.R hands over to it and performs no further type checks, assuming that
 # the inputs (given by rsl.R) are already type-checked.
 # Author: michael.kirchhof@udo.edu
-# Created: 16.12.2020
-# version: 0.2.1 "Bah Bah Bah"
+# Created: 17.12.2020
+# version: 0.2.2 "Flash Shorten"
 
 
 # create.norn - creates an empty noisyornetwork
@@ -169,8 +169,10 @@ as.norn.rsl <- function(rsl){
     piToFrom[[l]][[c]] <- c(norn$classifs[[c]]$conf %*% ownPi[[c]])
   }
   for(l in labels){
-    ownPi[[l]] <- Reduce("*", c(piToFrom[[l]][norn$labels[[l]]$parents], 
-                                list(rep(1, length(norn$labels[[l]]$prior)))))
+    ownPi[[l]] <- rep(1, length(norn$labels[[l]]$prior))
+    for(c in norn$labels[[l]]$parents){
+      ownPi[[l]] <- ownPi[[l]] * piToFrom[[l]][[c]]
+    }
   }
   for(r in rules){
     piToFrom[[r]] <- list()
@@ -199,13 +201,17 @@ as.norn.rsl <- function(rsl){
       ownLambda[[a]] <- c(1, 1)
     }
   }
-  for(l in c(labels, classifs, rules)){
-    ownLambda[[l]] <- rep(1, length(ownPi[[l]]))
-  }
   for(r in rules){
     lambdaToFrom[[r]] <- list()
     a <- norn$rules[[r]]$children
     lambdaToFrom[[r]][[a]] <- c(norn$auxs[[a]]$cpt %*% ownLambda[[a]])
+  }
+  for(r in rules){
+    a <- norn$rules[[r]]$children
+    ownLambda[[r]] <- lambdaToFrom[[r]][[a]]
+  }
+  for(l in c(labels, classifs)){
+    ownLambda[[l]] <- rep(1, length(ownPi[[l]]))
   }
   for(l in labels){
     lambdaToFrom[[l]] <- list()
@@ -220,7 +226,7 @@ as.norn.rsl <- function(rsl){
   }
   
   # Compute initial own beliefs
-  for(n in c(classifs, labels, rules, auxs)){
+  for(n in c(labels)){
     ownBel[[n]] <- ownLambda[[n]] * ownPi[[n]]
     ownBel[[n]] <- ownBel[[n]] / sum(ownBel[[n]])
   }
@@ -236,7 +242,12 @@ as.norn.rsl <- function(rsl){
     # Send pi messages from label nodes to rule nodes
     for(l in labels){
       for(r in norn$labels[[l]]$children){
-        piToFrom[[r]][[l]] <- ownPi[[l]] * Reduce("*", c(lambdaToFrom[[l]][setdiff(norn$labels[[l]]$children, r)], list(rep(1, length(ownPi[[l]])))))
+        piToFrom[[r]][[l]] <- ownPi[[l]]
+        for(r2 in norn$labels[[l]]$children){
+          if(r2 != r){
+            piToFrom[[r]][[l]] <- piToFrom[[r]][[l]] * lambdaToFrom[[l]][[r2]]
+          }
+        }
         piToFrom[[r]][[l]] <- piToFrom[[r]][[l]] / sum(piToFrom[[r]][[l]])
       }
     }
@@ -257,34 +268,20 @@ as.norn.rsl <- function(rsl){
       ownPi[[r]] <- c(prod, 1 - prod)
     }
     
-    # send pi messages from rules to auxs
+    # send pi messages from rules to auxs (which are equal to the auxs ownPi, 
+    # because it only has one parent)
     for(r in rules){
       a <- norn$rules[[r]]$children
-      piToFrom[[a]][[r]] <- c(norn$auxs[[a]]$cpt %*% ownBel[[r]])
+      ownPi[[a]] <- c(norn$auxs[[a]]$cpt %*% ownPi[[r]])
     }
     
-    # compute ownPi messages of auxs
-    for(a in auxs){
-      r <- norn$auxs[[a]]$parents
-      ownPi[[a]] <- piToFrom[[a]][[r]]
-    }
-    
-    # send lambda message from auxs to rules
-    for(a in auxs){
-      r <- norn$auxs[[a]]$parents
-      lambdaToFrom[[r]][[a]] <- c(norn$auxs[[a]]$cpt %*% ownLambda[[a]])
-    }
-    
-    # compute ownLambda message of rule nodes
-    for(r in rules){
-      a <- norn$rules[[r]]$children
-      ownLambda[[r]] <- lambdaToFrom[[r]][[a]]
-    }
+    # No need to compute ownlambda of auxs or to send lambda from aux to rules
+    # because evidence on rules does not change
     
     # send lambda messages from rule nodes to label nodes
     for(r in rules){
       for(l in norn$rules[[r]]$parents){
-        prod <- prod(prodParts[r, setdiff(norn$rules[[r]]$parents, l)])
+        prod <- prod(prodParts[r, norn$rules[[r]]$parents[norn$rules[[r]]$parents != l]])
         lambdaToFrom[[l]][[r]] <- ownLambda[[r]][1] * norn$rules[[r]]$probs[[l]] * prod +
           ownLambda[[r]][2] * (1 - norn$rules[[r]]$probs[[l]] * prod)
         lambdaToFrom[[l]][[r]] <- lambdaToFrom[[l]][[r]] / sum(lambdaToFrom[[l]][[r]])
@@ -293,7 +290,10 @@ as.norn.rsl <- function(rsl){
     
     # compute ownLambda beliefs of label nodes
     for(l in labels){
-      ownLambda[[l]] <- Reduce("*", c(lambdaToFrom[[l]], list(rep(1, length(ownLambda[[l]])))))
+      ownLambda[[l]] <- rep(1, length(ownLambda[[l]]))
+      for(r in norn$labels[[l]]$children){
+        ownLambda[[l]] <- ownLambda[[l]] * lambdaToFrom[[l]][[r]]
+      }
     }
     
     # send lambda messages from label nodes to classif nodes
@@ -310,15 +310,28 @@ as.norn.rsl <- function(rsl){
     
     # compute ownBel beliefs of all nodes
     newOwnBel <- ownBel
-    for(n in c(classifs, labels, rules, auxs)){
+    for(n in c(labels)){
       newOwnBel[[n]] <- ownPi[[n]] * ownLambda[[n]]
       newOwnBel[[n]] <- newOwnBel[[n]] / sum(newOwnBel[[n]])
     }
     
     # Check if beliefs are similar to previous iteration (then it has converged)
-    converged <- isTRUE(all.equal(ownBel, newOwnBel, tolerance = convThresh))
+    converged <- TRUE
+    for(i in seq(along = ownBel)){
+      if(any(abs(ownBel[[i]] - newOwnBel[[i]]) > convThresh)){
+        converged <- FALSE
+        break
+      }
+    }
+    
     ownBel <- newOwnBel
     if(converged) break
+  }
+  
+  # Compute own beliefs
+  for(n in c(classifs, labels, rules, auxs)){
+    ownBel[[n]] <- ownLambda[[n]] * ownPi[[n]]
+    ownBel[[n]] <- ownBel[[n]] / sum(ownBel[[n]])
   }
   
   if(!converged) warning("Loopy belief propagation has not converged.")
