@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 08.12.2020
-# Version: 0.4.1 "Masterade"
+# Created: 22.12.2020
+# Version: 0.4.2 "Hit me with those laser beans"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1726,7 +1726,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 #  a matrix with nRules rows and each column gives a inhibition prob per label
 .findOptNoisyOR <- function(rsl, prior, actual, nRules, exactness, maxIter, batchsize, 
                             alpha, beta1, beta2, eps, initValues, reg, lambda,
-                            maxLabelsPerRule, alphaReg, betaReg){
+                            maxLabelsPerRule, alphaReg, betaReg, regDecay){
   # TODO: This might not work if classifiers and label nodes have different labels
   
   # Generate start values
@@ -1808,7 +1808,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
                       "beta" = batchsize * lambda * .gradBetaRegularizer(rsl, inhProbs, alphaReg, betaReg))
     
     # Put the gradient into the ADAM formula
-    grad <- grad + regGrad
+    grad <- grad + regDecay^t * regGrad
     m <- beta1 * m + (1 - beta1) * grad
     v <- beta2 * v + (1 - beta2) * grad^2
     mHat <- m / (1 - beta1^t)
@@ -1835,7 +1835,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
                                batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                                beta2 = 0.999, eps = 1e-8, initValues = NULL,
                                reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf, 
-                               alphaReg = 0.15, betaReg = 0.6){
+                               alphaReg = 0.15, betaReg = 0.6, regDecay = 1){
   # TODO: Allow rsl to have existing rules and use them as starting point
   # TODO: Allow to auto-tune the nRules by setting it to NA
   # TODO: Make the gradient descent work with incomplete data
@@ -1846,7 +1846,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
   cat("Learning...\n")
   probs <- .findOptNoisyOR(rsl, prior, actual, nRules, exactness, maxIter, batchsize,
                            alpha, beta1, beta2, eps, initValues, reg, lambda,
-                           maxLabelsPerRule, alphaReg, betaReg)
+                           maxLabelsPerRule, alphaReg, betaReg, regDecay)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1887,14 +1887,17 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 #                     Not capped if set to Inf.
 #  alphaReg - hyperparameter for beta regularizer
 #  betaReg - hyperparameter for beta regularizer
+#  regDecay - Factor by which regularization strength should be multiplied with 
+#             after each iteration (to achieve a decay of e.g. 0.98^t). Use 1
+#             to not apply a decay.
 # Output:
 #  rsl object, but with added rules
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", 
                        exactness = "auto", maxIter = 500, 
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
-                       reg = "none", lambda = 0.25, maxLabelsPerRule = Inf, 
-                       alphaReg = 0.15, betaReg = 0.6){
+                       reg = "beta", lambda = 5, maxLabelsPerRule = 5, 
+                       alphaReg = 0.15, betaReg = 0.6, regDecay = 0.98){
   # TODO: Add more type checks
   if(exactness == "auto"){
     labs <- getLabels(rsl)
@@ -1931,7 +1934,7 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor",
                               initValues = initValues, 
                               reg = reg, lambda = lambda, 
                               maxLabelsPerRule = maxLabelsPerRule,
-                              alphaReg, betaReg))
+                              alphaReg, betaReg, regDecay))
   } else {
     stop(paste0("Method ", method, " is no known learning method."))
   }
