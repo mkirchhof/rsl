@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 22.12.2020
-# Version: 0.4.2 "Hit me with those laser beans"
+# Version: 0.4.3 "Striving home for christmas"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1790,6 +1790,12 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
                                          actual = unlist(actual[obs, ]),
                                          obs = observation,
                                          exactness = exactness)
+      
+      # In case gradient explodes (due to "not possible" observations for the 
+      # rules), replace with the average gradient
+      isGradOk <- curGrad != Inf & curGrad != -Inf & !is.nan(curGrad)
+      curGrad[!isGradOk] <- grad[!isGradOk] / max(which(selectedObs == obs) - 1, 1)
+      
       grad <- grad + curGrad
       # We don't have to weight the current gradient by anything; that already
       # happens inside .computeNoisyORGradient
