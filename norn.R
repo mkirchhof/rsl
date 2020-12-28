@@ -5,8 +5,8 @@
 # that rsl.R hands over to it and performs no further type checks, assuming that
 # the inputs (given by rsl.R) are already type-checked.
 # Author: michael.kirchhof@udo.edu
-# Created: 17.12.2020
-# version: 0.2.2 "Flash Shorten"
+# Created: 28.12.2020
+# version: 0.2.3 "8 {}s"
 
 
 # create.norn - creates an empty noisyornetwork
@@ -113,6 +113,13 @@ as.norn.rsl <- function(rsl){
 # Output:
 #  the updated norn object
 .removeRule.norn <- function(norn, rID){
+  # Remove all pointers from label nodes to this rule
+  lIDs <- norn$rules[[rID]]$parents
+  for(l in lIDs){
+    norn$labels[[l]]$children <- norn$labels[[l]]$children[norn$labels[[l]]$children != rID]
+  }
+  
+  # Remove rule and aux node
   aID <- norn$rules[[rID]]$children
   norn$rules[[rID]] <- NULL
   norn$auxs[[aID]] <- NULL
