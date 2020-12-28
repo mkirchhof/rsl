@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 22.12.2020
-# Version: 0.4.3 "Striving home for christmas"
+# Version: 0.4.4 "Can't stop paying"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1724,10 +1724,11 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 #                    a-posteriori probabilities for the given inputs
 # output:
 #  a matrix with nRules rows and each column gives a inhibition prob per label
-.findOptNoisyOR <- function(rsl, prior, actual, nRules, exactness, maxIter, batchsize, 
-                            alpha, beta1, beta2, eps, initValues, reg, lambda,
-                            maxLabelsPerRule, alphaReg, betaReg, regDecay){
+.findOptNoisyOR <- function(rsl, prior, actual, nRules, exactness, maxIter, maxHours, 
+                            batchsize, alpha, beta1, beta2, eps, initValues, reg, 
+                            lambda, maxLabelsPerRule, alphaReg, betaReg, regDecay){
   # TODO: This might not work if classifiers and label nodes have different labels
+  startTime <- Sys.time()
   
   # Generate start values
   labels <- getLabels(rsl)
@@ -1765,6 +1766,10 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
     t <- t + 1
     if(t > maxIter){
       cat("Reached maxIter without converging.\n")
+      break
+    }
+    if(difftime(Sys.time(), startTime, units = "hours") > maxHours){
+      cat("Reached maxHours without converging.\n")
       break
     }
     
@@ -1837,7 +1842,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 
 # .learnRulesNoisyOR - learns rules via the noisy-or algorithm
 .learnRulesNoisyOR <- function(rsl, prior, actual, nRules, exactness = "approx", 
-                               maxIter = 500, 
+                               maxIter = 1000, maxHours = 48,
                                batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                                beta2 = 0.999, eps = 1e-8, initValues = NULL,
                                reg = "none", lambda = 1e-3, maxLabelsPerRule = Inf, 
@@ -1850,9 +1855,9 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
   cat("Preprocessing data...\n")
   prior <- .preprocessData(rsl, prior)
   cat("Learning...\n")
-  probs <- .findOptNoisyOR(rsl, prior, actual, nRules, exactness, maxIter, batchsize,
-                           alpha, beta1, beta2, eps, initValues, reg, lambda,
-                           maxLabelsPerRule, alphaReg, betaReg, regDecay)
+  probs <- .findOptNoisyOR(rsl, prior, actual, nRules, exactness, maxIter, maxHours,
+                           batchsize, alpha, beta1, beta2, eps, initValues, reg, 
+                           lambda, maxLabelsPerRule, alphaReg, betaReg, regDecay)
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
@@ -1877,6 +1882,8 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 #  exactness - "exact" to calculate exact gradients, "approx" to approximate via
 #              Pearls linear algorithm (same as in predict.rsl). "auto" to 
 #              automatically decide based on size of model
+#  maxIter - integer, maximum number of training iterations
+#  maxHours - limit for the training time in hours
 #  batchsize - batchsize for adam optimizer
 #  alpha - hyperparameter for adam optimizer
 #  beta1 - hyperparameter for adam optimizer
@@ -1899,7 +1906,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 # Output:
 #  rsl object, but with added rules
 learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor", 
-                       exactness = "auto", maxIter = 500, 
+                       exactness = "auto", maxIter = 1000, maxHours = 48,
                        batchsize = 20, alpha = 0.001, beta1 = 0.9, 
                        beta2 = 0.999, eps = 1e-8, initValues = NULL, 
                        reg = "beta", lambda = 5, maxLabelsPerRule = 5, 
@@ -1935,7 +1942,7 @@ learnRules <- function(rsl, prior, actual, nRules = 10, method = "noisyor",
                                 beta2 = beta2, eps = eps))
   } else if(method == "noisyor"){
     return(.learnRulesNoisyOR(rsl, prior, actual, nRules, exactness = exactness,
-                              maxIter = maxIter, batchsize = batchsize, 
+                              maxIter = maxIter, maxHours = maxHours, batchsize = batchsize, 
                               alpha = alpha, beta1 = beta1, beta2 = beta2, eps = eps, 
                               initValues = initValues, 
                               reg = reg, lambda = lambda, 
