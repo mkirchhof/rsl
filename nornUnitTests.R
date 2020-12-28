@@ -1,6 +1,6 @@
 # Unit tests for noisyornetwork
 # Author: michael.kirchhof@udo.edu
-# Created: 14.12.2020
+# Created: 28.12.2020
 
 # Dependencies:
 # library(testthat)
@@ -263,3 +263,21 @@ predictTest <- function(){
 }
 
 predictTest()
+
+removeRuleTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood", "toxic"), accuracy = 1)
+  rsl <- .addNoisyOR(rsl, c(tasty = 0.2, not_tasty = 0.9, junkFood = 0.6, toxic = 1))
+  rsl <- .addNoisyOR(rsl, c(tasty = 0.6, not_tasty = 0.1, meat = 0.2))
+  
+  norn <- as.norn.rsl(rsl)
+  norn <- .addRule.norn(norn, list(L1 = c(0.2, 0.9), L3 = c(1, 0.6, 1)), "R1", "A1")
+  norn2 <- .addRule.norn(norn, list(L1 = c(0.6, 0.1), L2 = c(0.2, 1)), "R2", "A2")
+  norn2 <- .removeRule.norn(norn2, "R2")
+  
+  testthat::expect_equal(norn, norn2)
+}
+
+removeRuleTest()
