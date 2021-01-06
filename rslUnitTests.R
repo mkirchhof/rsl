@@ -1,6 +1,6 @@
 # Unit tests for rsl
 # Author: michael.kirchhof@udo.edu
-# Created: 16.07.2020
+# Created: 06.01.2021
 
 # Dependencies:
 # library(testthat)
@@ -483,3 +483,30 @@ addAllNoisyORNoRuletest <- function(){
 }
 
 addAllNoisyORNoRuletest()
+
+preprocessDataWithMissingsTest <- function(){
+  # do not give information on all labels for all observations:
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "ABC", c("A", "B", "C"), confusionMatrix = diag(3),
+                       prior = c(0.7, 0.2, 0.1))
+  rsl <- addClassifier(rsl, "DE", c("D","E"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "FG", c("F", "G"), confusionMatrix = diag(2))
+  
+  input <- data.frame(A = c(0.1, 0.6, 0.33, NA, NA),
+                      B = c(NA, 0.4, 0.33, NA, NA),
+                      C = c(0.3, NA, 0.33, NA, NA),
+                      F = c(0.9, NA, NA, NA, 0.5),
+                      G = c(0.1, NA, 0.1, 0.9, 0.5))
+  
+  out <- .preprocessData(rsl, data = input, imputeMissings = FALSE)
+  
+  expected <- list(data.frame(A = c(0.1, 0.6, 0.33, NA, NA),
+                              B = c(0.6, 0.4, 0.33, NA, NA),
+                              C = c(0.3, 0, 0.33, NA, NA)),
+                   data.frame(F = c(0.9, NA, 0.9, 0.1, 0.5),
+                              G = c(0.1, NA, 0.1, 0.9, 0.5)))
+  
+  testthat::expect_equivalent(out, expected)
+}
+
+preprocessDataWithMissingsTest()

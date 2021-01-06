@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 01.01.2021
-# Version: 0.4.6 "Don't top the party"
+# Created: 06.01.2021
+# Version: 0.5.0 "Summer Mays"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -849,7 +849,14 @@ plot.rsl <- function(rsl){
 # .classifierIDtoLabelID - for a given classifier ID, returns the ID of the 
 #                          label set it classifies
 .classifierIDtoLabelID <- function(rsl, id){
-  return(.labelSetToID(rsl, .IDtoClassifierLabels(rsl, id)))
+  return(bnlearn::children(rsl$bayesNet, id))
+}
+
+
+#.labelIDtoClassifierID - for a given label ID, returns the ID of the connected
+#                         classifier (or NULL if none is connected)
+.labelIDtoClassifierID <- function(rsl, id){
+  return(bnlearn::parents(rsl$bayesNet, id))
 }
 
 
@@ -898,6 +905,10 @@ plot.rsl <- function(rsl){
 
 .ruleToAux <- function(rsl, id){
   return(rsl$rules$auxID[rsl$rules$ruleID == id])
+}
+
+.auxIDtoRuleID <- function(rsl, id){
+  return(rsl$rules$ruleID[rsl$rules$auxID == id])
 }
 
 
@@ -975,10 +986,17 @@ plot.rsl <- function(rsl){
 
 # .preprocessData - adds missing labels and missing probabilities and reorders
 #                   the columns of a dataframe into the standard scheme
+# Input:
+#  rsl - an rsl object
+#  data - a dataframe where each column is a label and contains probabilties
+#  imputeMissings - if an observation contains NAs for a whole label group, should
+#                   they be replaced with their prior? (note: when input is given
+#                   for a couple of labels in the group, the rest will always be
+#                   imputed regardless of this argument)
 # Output:
 #  a list where each entry corresponds to a node and contains a dataframe with
 #  the imputed prior weights of the labels in that node for each observation
-.preprocessData <- function(rsl, data){
+.preprocessData <- function(rsl, data, imputeMissings = TRUE){
   # TODO: Make sure the output is in the correct order
   # TODO: Currently removes all labels that are not connected to a classifier (low priority)
   
@@ -1018,7 +1036,11 @@ plot.rsl <- function(rsl){
     # If all are missing, impute them with the classifier's prior
     isAllNA <- nNA == ncol(dataList[[i]])
     prior <- unlist(rsl$classifiers[[names(dataList)[i]]]$prior)
-    missingData[isAllNA, ] <- rep(prior, each = sum(isAllNA))
+    if(imputeMissings){
+      missingData[isAllNA, ] <- rep(prior, each = sum(isAllNA))
+    } else {
+      missingData[isAllNA, ] <- NA
+    }
     
     dataList[[i]][is.na(dataList[[i]])] <- missingData[is.na(dataList[[i]])]
   }
@@ -1630,28 +1652,57 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
 # .computeNoisyORGradient - computes the gradient of hamming loss for an
 #                           rsl with noisy-or rules
 .computeNoisyORGradient <- function(rsl, inhProbs, actual, obs, exactness){
+  # Exact method requires setting the evidence once in the beginning
+  if(exactness == "exact"){
+    rsl <- .setEvidence(rsl, obs)
+  }
+  
+  # Precalculate some things we need repeatedly later
+  allAuxs <- .getAllAuxNodes(rsl)
+  allLabels <- .getAllLabelNodes(rsl)
+  isUnknownActual <- is.na(actual)
+  isAnyActualUnknown <- any(isUnknownActual)
+  knownActuals <- actual[!isUnknownActual]
+  if(isAnyActualUnknown){
+    obsWithActuals <- obs
+    for(a in seq(along = knownActuals)){
+      cID <- .labelIDtoClassifierID(rsl, names(knownActuals)[a])
+      obsWithActuals[[cID]][] <- as.numeric(colnames(obsWithActuals[[cID]]) == knownActuals[a])
+    }
+  }
+  isLabelCorrect <- sapply(colnames(inhProbs), function(x) actual[.labelToID(rsl, x)] == x)
+  
   # Compute gradient
   grad <- matrix(0, nrow = nrow(inhProbs), ncol = ncol(inhProbs))
-  isLabelCorrect <- colnames(inhProbs) %in% actual
   for(rule in seq(nrow(inhProbs))){
     # Condition the network on all other rules
-    aID <- rsl$rules$auxID[rule]
+    aID <- allAuxs[rule]
+    rID <- .auxIDtoRuleID(rsl, aID)
     if(exactness == "exact"){
       rsl <- .retractAuxEvidence(rsl)
       rsl <- .setAuxEvidence(rsl, exclude = aID, propagate = TRUE)
     } else if(exactness == "approximate"){
-      auxs <- setdiff(.getAllAuxNodes(rsl), aID)
+      auxs <- allAuxs[allAuxs != aID]
       auxObs <- lapply(auxs, function(x) c(0, 1))
       names(auxObs) <- auxs
     }
     
     # compute P(rule = 1 | other rules = 1, x)
-    # TODO: This only works as long as the rule's p is 1, 
-    #       else the marginals of aID and rID are different
     if(exactness == "exact"){
-      pRule <- gRain::querygrain(rsl$compiledNet, nodes = aID, type = "marginal")[[1]][1]
+      pRule <- gRain::querygrain(rsl$compiledNet, nodes = rID, type = "marginal")[[1]][1]
     } else if(exactness == "approximate"){
-      pRule <- .beliefPropagation(rsl$norn, c(obs, auxObs), outNodes = aID)[[1]][2]
+      pRule <- .beliefPropagation(rsl$norn, c(obs, auxObs), outNodes = rID)[[1]][2]
+    }
+    
+    # Compute P(rule = 1 | all known actuals, other rules = 1, x)
+    if(isAnyActualUnknown){
+      if(exactness == "exact"){
+        pRuleCondOnActual <- gRain::querygrain(
+          gRain::setEvidence(rsl$compiledNet, nodes = names(knownActuals), states = knownActuals, propagate = TRUE), 
+          nodes = rID, type = "marginal")[[1]][1]
+      } else if(exactness == "approximate"){
+        pRuleCondOnActual <- .beliefPropagation(rsl$norn, c(obsWithActuals, auxObs), outNodes = rID)[[1]][2]
+      }
     }
     
     # Make sure we do not divide by zero or so
@@ -1661,20 +1712,45 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
       # compute P(each label | current rule = 0, all other rules = 1, x)
       if(exactness == "exact"){
         rsl$compiledNet <- gRain::setEvidence(rsl$compiledNet, nodes = aID, states = "not_fulfilled", propagate = TRUE)
-        pLabels <- gRain::querygrain(rsl$compiledNet, nodes = .getAllLabelNodes(rsl), type = "marginal")
+        pLabels <- gRain::querygrain(rsl$compiledNet, nodes = allLabels, type = "marginal")
       } else if(exactness == "approximate"){
-        pLabels <- .beliefPropagation(rsl$norn, c(obs, auxObs, list(aID = c(1, 0))), outNodes = .getAllLabelNodes(rsl))
+        pLabels <- .beliefPropagation(rsl$norn, c(obs, auxObs, list(aID = c(1, 0))), outNodes = allLabels)
       }
       # TODO: Make sure this is always the same order as actual
-      pLabels <- pLabels[match(.getAllLabelNodes(rsl), names(pLabels))]
+      pLabels <- pLabels[match(allLabels, names(pLabels))]
       pLabels <- unlist(pLabels)
+      
+      # compute P(each label | known actuals, current rule = 0, all other rules = 1)
+      if(isAnyActualUnknown){
+        if(exactness == "exact"){
+          pLabelsCondOnActual <- gRain::querygrain(
+            gRain::setEvidence(rsl$compiledNet, nodes = names(knownActuals), states = knownActuals, propagate = TRUE), 
+            nodes = allLabels, type = "marginal")
+          pLabelsCondOnActual[names(knownActuals)] <- obsWithActuals[!isUnknownActual]
+        } else if(exactness == "approximate"){
+          pLabelsCondOnActual <- .beliefPropagation(rsl$norn, c(obsWithActuals, auxObs, list(aID = c(1, 0))), outNodes = allLabels)
+        }
+        # TODO: Make sure this is always the same order as actual
+        pLabelsCondOnActual <- pLabelsCondOnActual[match(allLabels, names(pLabelsCondOnActual))]
+        pLabelsCondOnActual <- unlist(pLabelsCondOnActual)
+      }
+      
       for(label in seq(ncol(inhProbs))){
         pLabel <- pLabels[label]
         # compute gradient
         gr <- pLabel * (1 - pRule) / (inhProbs[rule, label] * pRule)
-        if(isLabelCorrect[label]){
-          gr <- gr - prod(inhProbs[rule, isLabelCorrect]) /
-            ((1 - prod(inhProbs[rule, isLabelCorrect])) * inhProbs[rule, label]) 
+        if(is.na(isLabelCorrect[label])){
+          pLabelCondOnActual <- pLabelsCondOnActual[label]
+          gr <- gr - pLabelCondOnActual * (1 - pRuleCondOnActual) /
+            (inhProbs[rule, label] * pRuleCondOnActual)
+        } else if(isLabelCorrect[label]){
+          if(isAnyActualUnknown){
+            gr <- gr - (1 - pRuleCondOnActual) / 
+              (pRuleCondOnActual * inhProbs[rule, label])
+          } else {
+            gr <- gr - prod(inhProbs[rule, isLabelCorrect]) /
+              ((1 - prod(inhProbs[rule, isLabelCorrect])) * inhProbs[rule, label]) 
+          }
         }
         grad[rule, label] <- gr
       }
@@ -1791,11 +1867,8 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
     grad <- rep(0, length(inhProbs))
     for(obs in selectedObs){
       # This uses that labels are unique. If that is changed, we have to change
-      # the computation of jointPrior here too
+      # the computation here too
       observation <- lapply(prior, "[", obs, , drop = FALSE) # argument left blank on purpose
-      if(exactness == "exact"){
-        rsl <- .setEvidence(rsl, observation)
-      }
       curGrad <- .computeNoisyORGradient(rsl,
                                          inhProbs = inhProbs, 
                                          actual = unlist(actual[obs, ]),
