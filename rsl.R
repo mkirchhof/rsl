@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
 # Created: 01.01.2021
-# Version: 0.4.5 "Primark Donna"
+# Version: 0.4.6 "Don't top the party"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -2084,6 +2084,8 @@ accuracy <- function(pred, actual, na.rm = TRUE){
     logL[i] <- sum(log(pred[i, unlist(actual[i, ])]))
   }
   
+  logL[logL == -Inf] <- -23
+  
   return(logL)
 }
 
@@ -2139,7 +2141,7 @@ accuracy <- function(pred, actual, na.rm = TRUE){
 #                     NOTE: give priors and actuals, do not give predictions and actuals
 .avgLogLikelihood <- function(rsl, prior, actual){
   logLik <- log(.likelihood(rsl, prior, actual))
-  logLik[logLik == -Inf] <- NA
+  logLik[logLik == -Inf] <- -23
   return(mean(logLik, na.rm = TRUE))
 }
 
