@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 22.12.2020
-# Version: 0.4.4 "Can't stop paying"
+# Created: 01.01.2021
+# Version: 0.4.6 "Don't top the party"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -382,17 +382,23 @@ addRule <- function(rsl, rule, prob = 0.9){
 #  inhProbs - a matrix of inhibition probabilities (in [0, 1]) 
 #             where each row is a rule and each column is a label. Columns need
 #             to be named
+#  ruleProbs - a numeric containing the rule prob for each rule. If only one prob
+#              is given, it is used for all rules.
 # Output:
 #  the updated rsl object
-.addAllNoisyOR <- function(rsl, inhProbs){
+.addAllNoisyOR <- function(rsl, inhProbs, ruleProbs = 1){
   if(nrow(inhProbs) == 0){
     return(rsl)
+  }
+  
+  if(length(ruleProbs) == 1){
+    ruleProbs <- rep(ruleProbs, nrow(inhProbs))
   }
   
   for(i in seq(nrow(inhProbs))){
     probs <- inhProbs[i, ]
     probs <- probs[probs != 1]
-    rsl <- .addNoisyOR(rsl, probs)
+    rsl <- .addNoisyOR(rsl, probs, prob = ruleProbs[i])
   }
   
   return(rsl)
@@ -1775,7 +1781,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
     
     # Add the new noisy-or rules to the rsl
     rsl <- .removeAllRules(rsl)
-    rsl <- .addAllNoisyOR(rsl, inhProbs)
+    rsl <- .addAllNoisyOR(rsl, inhProbs, 0.999)
     if(exactness == "exact"){
       rsl <- .compile(rsl)
     }
@@ -1861,7 +1867,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
   
   # Add the learned rules to the rsl
   # TODO: Prune the learned rule into a "normal" rule
-  rsl <- .addAllNoisyOR(rsl, probs)
+  rsl <- .addAllNoisyOR(rsl, probs, 0.999)
   
   return(rsl)
 }
@@ -2078,6 +2084,8 @@ accuracy <- function(pred, actual, na.rm = TRUE){
     logL[i] <- sum(log(pred[i, unlist(actual[i, ])]))
   }
   
+  logL[logL == -Inf] <- -23
+  
   return(logL)
 }
 
@@ -2133,7 +2141,7 @@ accuracy <- function(pred, actual, na.rm = TRUE){
 #                     NOTE: give priors and actuals, do not give predictions and actuals
 .avgLogLikelihood <- function(rsl, prior, actual){
   logLik <- log(.likelihood(rsl, prior, actual))
-  logLik[logLik == -Inf] <- NA
+  logLik[logLik == -Inf] <- -23
   return(mean(logLik, na.rm = TRUE))
 }
 
