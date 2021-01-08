@@ -1,7 +1,7 @@
 # Bayesian Network based probabilistic Rule Stacking Learner
 # Author: michael.kirchhof@udo.edu
-# Created: 06.01.2021
-# Version: 0.5.0 "Summer Mays"
+# Created: 07.01.2021
+# Version: 0.5.1 "Hide It"
 
 # Dependencies: (not loaded into namespace due to style guide)
 # library(bnlearn) # for constructing bayesian networks
@@ -1143,7 +1143,7 @@ predict.rsl <- function(rsl, data, method = "auto", type = "marginal",
   if(method == "exact"){
     pred <- .predictExact.rsl(rsl, data, type, showProgress)
   } else if(method == "approximate"){
-    pred <- predict.norn(rsl$norn, rsl, data, showProgress)
+    pred <- predict.norn(rsl$norn, rsl, data, type, showProgress)
   }
   
   return(pred)

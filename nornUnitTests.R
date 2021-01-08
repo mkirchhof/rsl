@@ -1,6 +1,6 @@
 # Unit tests for noisyornetwork
 # Author: michael.kirchhof@udo.edu
-# Created: 28.12.2020
+# Created: 07.01.2021
 
 # Dependencies:
 # library(testthat)
@@ -281,3 +281,29 @@ removeRuleTest <- function(){
 }
 
 removeRuleTest()
+
+beliefPropagationJointMultipleRulesTest <- function(){
+  rsl <- createRSL()
+  rsl <- addClassifier(rsl, "taste", c("tasty", "not_tasty"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "meat", c("meat", "noMeat"), confusionMatrix = diag(2))
+  rsl <- addClassifier(rsl, "healthy", c("healthy", "junkFood", "toxic"), accuracy = 1)
+  rsl <- .addNoisyOR(rsl, c(tasty = 0.2, not_tasty = 0.9, junkFood = 0.6, toxic = 1), prob = 0.99)
+  rsl <- .addNoisyOR(rsl, c(tasty = 0.6, not_tasty = 0.1, meat = 0.2), prob = 0.99)
+  
+  norn <- as.norn.rsl(rsl)
+  norn <- .addRule.norn(norn, list(L1 = c(0.2, 0.9), L3 = c(1, 0.6, 1)), "R1", "A1", p = 0.99)
+  norn <- .addRule.norn(norn, list(L1 = c(0.6, 0.1), L2 = c(0.2, 1)), "R2", "A2", p = 0.99)
+  
+  input1 <- data.frame("tasty" = 0.7, "meat" = 0.2, "healthy" = 0.6, "junkFood" = 0.3)
+  input2 <- list(C1 = c(0.7, 0.3), C2 = c(0.2, 0.8), C3 = c(0.6, 0.3, 0.1), A1 = c(0, 1), A2 = c(0, 1))
+  
+  out1 <- predict(rsl, input1, type = "joint")
+  out1 <- unlist(out1)
+  out2 <- .beliefPropagationJoint(norn, input2, outNodes = c("L1", "L2", "L3"))
+  out2 <- unlist(out2)
+  names(out2) <- names(out1)
+  
+  testthat::expect_equal(out1, out2)
+}
+
+beliefPropagationJointMultipleRulesTest()
