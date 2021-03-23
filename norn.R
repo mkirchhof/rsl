@@ -5,8 +5,8 @@
 # that rsl.R hands over to it and performs no further type checks, assuming that
 # the inputs (given by rsl.R) are already type-checked.
 # Author: michael.kirchhof@udo.edu
-# Created: 07.01.2021
-# version: 0.3.0 "I will always slice you"
+# Created: 21.01.2021
+# version: 0.3.1 "I am the panther"
 
 # Dependencies:
 # library(gRbase) # for tabSlice2
@@ -486,10 +486,15 @@ as.norn.rsl <- function(rsl){
     f0 <- list()
     f1 <- list()
     for(r in rules){
-      piProd <- array(apply(expand.grid(piToFrom[[r]]), 1, prod), dim = sapply(piToFrom[[r]], length))
-      triggerProd <- array(apply(expand.grid(norn$rules[[r]]$probs), 1, prod), dim = sapply(norn$rules[[r]]$probs, length))
-      f0[[r]] <- piProd * triggerProd
-      f1[[r]] <- piProd - f0[[r]]
+      if(!is.null(norn$rules[[r]]$parents)){
+        piProd <- array(apply(expand.grid(piToFrom[[r]]), 1, prod), dim = sapply(piToFrom[[r]], length))
+        triggerProd <- array(apply(expand.grid(norn$rules[[r]]$probs), 1, prod), dim = sapply(norn$rules[[r]]$probs, length))
+        f0[[r]] <- piProd * triggerProd
+        f1[[r]] <- piProd - f0[[r]]
+      } else {
+        f0[[r]] <- 1
+        f1[[r]] <- 1
+      }
     }
     
     # compute ownPi beliefs of rule nodes
