@@ -325,6 +325,14 @@ as.norn.rsl <- function(rsl){
       newOwnBel[[n]] <- newOwnBel[[n]] / sum(newOwnBel[[n]])
     }
     
+    # Stop if there was a division through 0 due to contradicting beliefs
+    isNaBel <- sapply(newOwnBel, function(x) any(is.na(x)))
+    if(any(isNaBel)){
+      newOwnBel[isNaBel] <- ownBel[isNaBel]
+      warning("Strictly contradicting beliefs (all beliefs of a node are 0). Returned result is probably wrong.")
+      return(newOwnBel)
+    }
+    
     # Check if beliefs are similar to previous iteration (then it has converged)
     converged <- TRUE
     for(i in seq(along = ownBel)){
